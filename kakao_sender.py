@@ -165,43 +165,111 @@ def _clip_image(image_path: str):
 
 
 # ─────────────────────────────────────────────────────────
+#  내부 함수 — 채팅 탭 전환 헬퍼
+# ─────────────────────────────────────────────────────────
+def _switch_to_chat_tab(main_win) -> bool:
+    """
+    카카오톡 메인 창에서 '채팅' 탭으로 전환한다.
+
+    카카오톡 사이드바의 탭 버튼("채팅")을 찾아 클릭.
+    Button → TabItem → ListItem 순서로 컨트롤 타입을 시도한다.
+    성공하면 True, 실패하면 False 반환.
+    """
+    for ctrl_type in ["Button", "TabItem", "ListItem"]:
+        try:
+            for ctrl in main_win.descendants(control_type=ctrl_type):
+                try:
+                    if ctrl.window_text().strip() == "채팅":
+                        ctrl.click_input()
+                        time.sleep(0.4)
+                        logger.info("채팅 탭 전환 성공")
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    logger.warning("채팅 탭 버튼을 찾지 못함 — 현재 탭 유지")
+    return False
+
+
+def _type_in_chat_search(main_win, room_name: str) -> bool:
+    """
+    채팅 탭의 검색 입력창에 방 이름을 입력한다.
+
+    채팅 탭 상단의 검색 Edit 컨트롤을 찾아 클릭 후 붙여넣기.
+    친구/채팅 통합 검색(Ctrl+F)이 아닌 채팅 전용 검색창을 사용하여
+    친구 목록과 혼용되지 않도록 한다.
+    성공하면 True, 실패하면 False 반환.
+    """
+    try:
+        edits = main_win.descendants(control_type="Edit")
+        # 활성화된 첫 번째 Edit = 채팅 탭 검색창
+        for edit in edits:
+            try:
+                if edit.is_enabled():
+                    edit.click_input()
+                    time.sleep(0.2)
+                    send_keys("^a")        # 기존 검색어 전체 선택
+                    time.sleep(0.1)
+                    _clip_text(room_name)
+                    send_keys("^v")
+                    logger.info(f"채팅 탭 검색창에 '{room_name}' 입력")
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"채팅 탭 검색창 탐색 실패: {e}")
+
+    return False
+
+
+# ─────────────────────────────────────────────────────────
 #  내부 함수 — 채팅방 열기
 # ─────────────────────────────────────────────────────────
 def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Application":
     """
-    카카오톡에서 채팅방을 검색해서 연다.
+    카카오톡 채팅 탭 검색창으로 채팅방을 찾아 연다.
 
-    [수정된 동작]
-    1. Ctrl+F 검색 → 채팅방 이름 입력 → 클릭으로 채팅방 열기
-    2. 채팅방이 새 팝업 창으로 열리면 → 해당 창에 다시 연결
-       (기존 코드는 메인 창에만 연결되어 검색란에 메세지가 입력되던 문제 수정)
-    3. 채팅방이 탭으로 열리면 → Escape로 검색 UI 닫고 입력 준비
+    [검색 방식]
+    Ctrl+F(친구+채팅 통합 검색) 대신 채팅 탭 전용 검색창을 사용.
+    → 친구 목록이 검색 결과에 섞이지 않아 정확한 채팅방만 선택 가능.
 
     [채팅방 선택 우선순위]
     1순위: 이름이 정확히 일치 (1:1 채팅 등)
     2순위: 이름이 포함된 방 (그룹채팅 등)
     3순위: Enter 키 fallback
+
+    [창 연결]
+    채팅방이 팝업 창으로 열리면 GetForegroundWindow()로 감지해 재연결.
+    탭으로 열리면 Escape로 검색 UI를 닫은 후 반환.
     """
     main_win = app.top_window()
     main_win.set_focus()
-    time.sleep(0.5)
+    time.sleep(0.3)
 
-    # ── 검색창 열기 (Ctrl+F) ──
-    send_keys("^f")
-    time.sleep(0.8)
+    # ── Step 1: 채팅 탭으로 전환 ──────────────────────────────
+    _switch_to_chat_tab(main_win)
 
-    # ── 채팅방 이름 입력 ──
-    send_keys("^a")          # 기존 검색어 지우기
-    time.sleep(0.1)
-    _clip_text(room_name)
-    send_keys("^v")
-    time.sleep(1.2)          # 검색 결과 로딩 대기
+    # ── Step 2: 채팅 탭 검색창에 방 이름 입력 ─────────────────
+    typed = _type_in_chat_search(main_win, room_name)
 
-    # ── 검색 결과에서 채팅방 선택 ──
+    if not typed:
+        # 채팅 탭 검색창을 못 찾은 경우 → Ctrl+F 로 fallback
+        logger.warning("채팅 탭 검색창 실패 → Ctrl+F fallback 사용")
+        send_keys("^f")
+        time.sleep(0.8)
+        send_keys("^a")
+        _clip_text(room_name)
+        send_keys("^v")
+
+    time.sleep(1.2)   # 검색 결과 로딩 대기
+
+    # ── Step 3: 검색 결과에서 채팅방 선택 ────────────────────
     try:
         all_items = main_win.descendants(control_type="ListItem")
 
-        # 1순위: 정확히 일치하는 방
+        # 1순위: 이름이 정확히 일치하는 방
         exact_match = None
         for item in all_items:
             try:
@@ -212,7 +280,7 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
                 continue
 
         if exact_match:
-            exact_match.double_click_input()
+            exact_match.click_input()
             logger.info(f"채팅방 '{room_name}' 정확 일치 클릭")
         else:
             # 2순위: 이름이 포함된 방
@@ -226,7 +294,7 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
                     continue
 
             if partial_match:
-                partial_match.double_click_input()
+                partial_match.click_input()
                 logger.warning(
                     f"'{room_name}' 정확 일치 없음 → "
                     f"포함된 방 선택: '{partial_match.window_text().strip()}'"
@@ -240,14 +308,12 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
         logger.warning(f"채팅방 클릭 예외: {e} → Enter 키 fallback")
         send_keys("{ENTER}")
 
-    # ── 채팅방이 열릴 때까지 대기 ──
+    # ── Step 4: 채팅방 열릴 때까지 대기 ──────────────────────
     time.sleep(1.2)
 
-    # ── [핵심 수정] 실제로 열린 창에 연결 ──────────────────────
+    # ── Step 5: 실제로 열린 창에 재연결 ──────────────────────
     # 카카오톡은 채팅방을 별도 팝업 창으로 열 수 있음.
-    # 그 경우 기존 app 객체(메인 창)로는 채팅 입력창을 찾을 수 없어
-    # 검색란에 메세지가 입력되는 버그 발생.
-    # → GetForegroundWindow()로 현재 활성 창을 감지해 다시 연결.
+    # GetForegroundWindow()로 현재 활성 창이 바뀌었는지 확인 후 재연결.
     fg_hwnd = win32gui.GetForegroundWindow()
     fg_title = win32gui.GetWindowText(fg_hwnd)
     logger.info(f"채팅 열린 후 활성 창: '{fg_title}' (HWND={fg_hwnd})")
@@ -256,14 +322,14 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
         # 새 팝업 창으로 열린 경우
         try:
             chat_app = Application(backend="uia").connect(handle=fg_hwnd)
-            logger.info(f"채팅 팝업 창 연결 성공")
+            logger.info("채팅 팝업 창 연결 성공")
             return chat_app
         except Exception as e:
             logger.warning(f"채팅 팝업 연결 실패: {e} → 메인 창 사용")
 
     # 탭으로 열린 경우 → Escape로 검색 UI 닫기
     send_keys("{ESCAPE}")
-    time.sleep(0.4)
+    time.sleep(0.3)
     logger.info("탭 모드: 검색 UI 닫음")
     return app
 
