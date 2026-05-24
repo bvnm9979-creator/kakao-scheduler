@@ -236,31 +236,47 @@ def _open_chat_room(app: "Application", room_name: str):
         # pywinauto UIA: ListItem 컨트롤 전체 탐색
         all_items = main_win.descendants(control_type="ListItem")
 
-        # 방 이름이 포함된 항목 찾기
-        matched = None
+        # ── 1순위: 이름이 정확히 일치하는 방 ──────────────────
+        # "고현석" 입력 시 → 이름이 딱 "고현석"인 1:1 채팅방 우선 선택
+        exact_match = None
         for item in all_items:
             try:
-                item_text = item.window_text()
-                if room_name in item_text:
-                    matched = item
+                item_text = item.window_text().strip()
+                if item_text == room_name:
+                    exact_match = item
                     break
             except Exception:
                 continue
 
-        if matched:
-            matched.double_click_input()
+        if exact_match:
+            exact_match.double_click_input()
             time.sleep(0.8)
-            logger.info(f"채팅방 '{room_name}' 항목 클릭 성공")
+            logger.info(f"채팅방 '{room_name}' 정확 일치 클릭 성공")
             return
 
-        # 정확히 매칭되는 항목 없으면 첫 번째 결과 클릭 시도
-        if all_items:
-            logger.warning(f"'{room_name}' 정확 매칭 실패. 첫 번째 결과 항목을 선택합니다.")
-            all_items[0].double_click_input()
+        # ── 2순위: 이름이 포함된 방 (부분 일치) ──────────────
+        # 정확히 일치하는 방이 없을 때만 사용
+        # 예: "팀장 고현석방", "고현석, 김민수" 등
+        partial_match = None
+        for item in all_items:
+            try:
+                item_text = item.window_text()
+                if room_name in item_text:
+                    partial_match = item
+                    break
+            except Exception:
+                continue
+
+        if partial_match:
+            partial_match.double_click_input()
             time.sleep(0.8)
+            logger.warning(
+                f"채팅방 이름 '{room_name}' 정확 일치 없음 → "
+                f"포함된 방 선택: '{partial_match.window_text().strip()}'"
+            )
             return
 
-        # 결과 항목 자체가 없으면 Enter로 선택 (Fallback)
+        # ── 3순위: ListItem 자체가 없으면 Enter로 첫 결과 선택 ──
         logger.warning("검색 결과 ListItem을 찾지 못했습니다. Enter 키로 대체합니다.")
         send_keys("{ENTER}")
         time.sleep(0.8)
