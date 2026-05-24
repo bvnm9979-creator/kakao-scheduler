@@ -16,11 +16,12 @@ import threading
 from datetime import datetime
 
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import filedialog, messagebox
 
 # ── 카카오톡 자동화 모듈 (플랫폼 무관하게 import 가능)
 try:
-    from kakao_sender import send_to_room, check_available
+    from kakao_sender import send_to_room, check_available, update_coord
     KAKAO_MODULE_OK = True
 except ImportError:
     KAKAO_MODULE_OK = False
@@ -30,6 +31,9 @@ except ImportError:
 
     def check_available():
         return False, "kakao_sender 모듈 없음"
+
+    def update_coord(key, value):
+        pass
 
 
 # ─────────────────────────────────────────────
@@ -285,10 +289,12 @@ class KakaoSchedulerApp(ctk.CTk):
         self._tabs.add("⚙️  예약 설정")
         self._tabs.add("📋  예약 목록")
         self._tabs.add("📜  발송 로그")
+        self._tabs.add("🎯  좌표 가이드")
 
         self._build_tab_settings(self._tabs.tab("⚙️  예약 설정"))
         self._build_tab_list(self._tabs.tab("📋  예약 목록"))
         self._build_tab_log(self._tabs.tab("📜  발송 로그"))
+        self._build_tab_coord(self._tabs.tab("🎯  좌표 가이드"))
 
         # ── 상태 바 ──
         sbar = ctk.CTkFrame(self, fg_color="#0a0a14", corner_radius=0, height=30)
@@ -410,6 +416,269 @@ class KakaoSchedulerApp(ctk.CTk):
     def _build_tab_log(self, tab):
         self._log = LogPanel(tab, corner_radius=0)
         self._log.pack(fill="both", expand=True)
+
+    # ── 좌표 가이드 탭 ───────────────────────────────────────
+    def _build_tab_coord(self, tab):
+        outer = ctk.CTkScrollableFrame(tab)
+        outer.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # ── 경고 카드 ─────────────────────────────────────────
+        warn = ctk.CTkFrame(outer, corner_radius=12, fg_color="#3d1a00")
+        warn.pack(fill="x", padx=2, pady=(6, 4))
+        ctk.CTkLabel(warn, text="📌  카카오톡 실행 전 반드시 확인하세요!",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color="#ffaa44", anchor="w").pack(fill="x", padx=16, pady=(12, 5))
+        for line in [
+            "① 카카오톡 PC버전을 실행해 주세요",
+            "② 아래 그림처럼  채팅방 목록이 보이는 상태여야 합니다",
+            "③ 카카오톡 창을 최소화하거나 다른 창 뒤에 숨기지 마세요",
+        ]:
+            ctk.CTkLabel(warn, text=line, text_color="#ffcc88",
+                         font=ctk.CTkFont(size=12), anchor="w").pack(
+                         fill="x", padx=24, pady=1)
+        ctk.CTkFrame(warn, fg_color="transparent", height=10).pack()
+
+        # ── 레이아웃 다이어그램 카드 ──────────────────────────
+        diag_card = self._card(outer, "📐  카카오톡 창 구조 & 클릭 순서")
+        ctk.CTkLabel(diag_card,
+                     text="프로그램이 ①②③ 순서로 해당 위치를 자동 클릭합니다",
+                     text_color="#888", font=ctk.CTkFont(size=11),
+                     anchor="w").pack(fill="x", padx=16, pady=(0, 6))
+
+        # Canvas 컨테이너
+        cv_wrap = ctk.CTkFrame(diag_card, fg_color="#0d0d1a", corner_radius=8)
+        cv_wrap.pack(fill="x", padx=16, pady=(0, 14))
+
+        canvas = tk.Canvas(cv_wrap, width=500, height=300,
+                           bg="#0d0d1a", highlightthickness=0)
+        canvas.pack(padx=12, pady=12)
+        self._draw_kakao_diagram(canvas)
+
+        # ── 좌표 미세 조정 카드 ───────────────────────────────
+        adj_card = self._card(outer, "🔧  클릭 좌표 미세 조정")
+        ctk.CTkLabel(adj_card,
+                     text="PC 환경마다 카카오톡 창 위치가 다를 수 있어요.\n"
+                          "실제로 안 맞는 항목만 숫자를 바꾸고 '적용' 버튼을 눌러주세요.",
+                     text_color="#888", font=ctk.CTkFont(size=11),
+                     justify="left", anchor="w").pack(fill="x", padx=16, pady=(0, 8))
+
+        # 좌표 조정 항목 정의
+        self._coord_vars: dict = {}
+        rows = [
+            ("chat_tab_x_offset",    "① 채팅 탭  X  (창 왼쪽에서 →)",   "px",   40, 200),
+            ("chat_tab_y_ratio",     "① 채팅 탭  Y  (창 높이 비율 %)",   "%",     5,  60),
+            ("search_x_from_right",  "② 검색버튼 X  (창 오른쪽에서 ←)", "px",   60, 250),
+            ("search_y_from_top",    "② 검색버튼 Y  (창 위쪽에서 ↓)",   "px",   25, 120),
+            ("input_tab_offset",     "③ 입력창 X  (사이드바+목록 폭)",   "px",  150, 500),
+            ("input_y_from_bottom",  "③ 입력창 Y  (창 아래쪽에서 ↑)",   "px",   20, 120),
+        ]
+        defaults = {
+            "chat_tab_x_offset":   75,
+            "chat_tab_y_ratio":    30,   # % 표시 (내부에서 /100)
+            "search_x_from_right": 130,
+            "search_y_from_top":    55,
+            "input_tab_offset":    330,
+            "input_y_from_bottom":  50,
+        }
+
+        for key, label, unit, mn, mx in rows:
+            row = ctk.CTkFrame(adj_card, fg_color="transparent")
+            row.pack(fill="x", padx=16, pady=3)
+
+            ctk.CTkLabel(row, text=label, width=260,
+                         anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
+
+            var = ctk.StringVar(value=str(defaults[key]))
+            self._coord_vars[key] = var
+
+            entry = ctk.CTkEntry(row, textvariable=var, width=70,
+                                 justify="center", font=ctk.CTkFont(size=13))
+            entry.pack(side="left", padx=(0, 6))
+
+            ctk.CTkLabel(row, text=unit, text_color="#888",
+                         font=ctk.CTkFont(size=11)).pack(side="left")
+
+        # 적용 버튼
+        ctk.CTkButton(
+            adj_card,
+            text="✅  좌표 적용",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=44, fg_color="#1a5e32", hover_color="#154d28",
+            command=self._apply_coords,
+        ).pack(fill="x", padx=16, pady=(10, 16))
+
+    # ── 좌표 적용 핸들러 ─────────────────────────────────────
+    def _apply_coords(self):
+        """입력된 좌표 값을 kakao_sender에 적용한다."""
+        try:
+            for key, var in self._coord_vars.items():
+                raw = var.get().strip()
+                if key == "chat_tab_y_ratio":
+                    update_coord(key, float(raw) / 100.0)
+                else:
+                    update_coord(key, int(float(raw)))
+            self._set_status("🎯 좌표 설정이 적용되었습니다")
+            self._log.append("좌표 설정 적용 완료", "info")
+            from tkinter import messagebox
+            messagebox.showinfo("완료", "좌표가 적용되었습니다!\n이제 발송을 테스트해보세요.")
+        except ValueError as e:
+            from tkinter import messagebox
+            messagebox.showerror("오류", f"숫자만 입력해주세요.\n{e}")
+
+    # ── 카카오톡 레이아웃 다이어그램 그리기 ──────────────────
+    @staticmethod
+    def _draw_kakao_diagram(canvas: tk.Canvas):
+        """
+        Canvas에 카카오톡 창 구조와 클릭 위치를 그린다.
+
+        [레이아웃]
+        ┌────────────────────────────────────── 전체 창 ──┐
+        │ [제목표시줄]                          [🔍] ②   │
+        ├──────┬───────────────────────────────────────── │
+        │      │  채팅방 목록                   채팅 내용 │
+        │  아  │  ──────────────────────                 │
+        │  이  │  채팅방 이름                            │
+        │  ①  │  ──────────────────────                 │
+        │  콘  │  채팅방 이름          ┌────────────────┐│
+        │      │                      │  메세지 입력 ③ ││
+        └──────┴──────────────────────┴────────────────┘┘
+        """
+        W, H = 500, 300
+
+        # ── 창 외곽 ──────────────────────────────────────────
+        canvas.create_rectangle(8, 8, W - 8, H - 8,
+                                 fill="#1e1e32", outline="#4477bb", width=2, tags="all")
+
+        # ── 제목 표시줄 ──────────────────────────────────────
+        TITLE_H = 30
+        canvas.create_rectangle(8, 8, W - 8, 8 + TITLE_H,
+                                 fill="#2a2a48", outline="#4477bb", width=1)
+        canvas.create_text(W // 2, 8 + TITLE_H // 2,
+                           text="카카오톡", fill="#cccccc",
+                           font=("Arial", 10, "bold"))
+        # 창 버튼 (❌ 모양)
+        for bx, bc in [(W - 26, "#cc4444"), (W - 50, "#888"), (W - 74, "#888")]:
+            canvas.create_oval(bx - 7, 17, bx + 7, 31,
+                               fill=bc, outline="")
+
+        # ── 영역 경계 ─────────────────────────────────────────
+        CONTENT_TOP = 8 + TITLE_H
+        SIDEBAR_R   = 68          # 사이드바 오른쪽 x
+        LIST_R      = 230         # 채팅목록 오른쪽 x
+        ROOM_R      = W - 8       # 채팅룸 오른쪽 x
+        BOTTOM      = H - 8
+
+        # 사이드바
+        canvas.create_rectangle(8, CONTENT_TOP, SIDEBAR_R, BOTTOM,
+                                 fill="#141428", outline="#333355", width=1)
+        canvas.create_text((8 + SIDEBAR_R) // 2, (CONTENT_TOP + BOTTOM) // 2,
+                           text="아\n이\n콘", fill="#555577",
+                           font=("Arial", 9))
+
+        # 채팅방 목록
+        canvas.create_rectangle(SIDEBAR_R, CONTENT_TOP, LIST_R, BOTTOM,
+                                 fill="#191930", outline="#333355", width=1)
+        # 목록 헤더
+        canvas.create_rectangle(SIDEBAR_R, CONTENT_TOP, LIST_R, CONTENT_TOP + 28,
+                                 fill="#22223a", outline="#333355")
+        canvas.create_text((SIDEBAR_R + LIST_R) // 2, CONTENT_TOP + 14,
+                           text="채팅", fill="#aaaacc", font=("Arial", 9, "bold"))
+
+        # 채팅방 목록 항목 (3개)
+        for i, name in enumerate(["팀 공지방", "프로젝트 A팀", "마케팅팀"]):
+            y0 = CONTENT_TOP + 28 + i * 44
+            canvas.create_rectangle(SIDEBAR_R + 2, y0 + 2,
+                                     LIST_R - 2, y0 + 42,
+                                     fill="#1e1e38", outline="#2a2a50", width=1)
+            canvas.create_oval(SIDEBAR_R + 10, y0 + 10,
+                                SIDEBAR_R + 32, y0 + 32,
+                                fill="#2a4a7a", outline="")
+            canvas.create_text(SIDEBAR_R + 75, y0 + 21,
+                               text=name, fill="#aaaacc", font=("Arial", 9))
+
+        # 채팅룸 영역
+        canvas.create_rectangle(LIST_R, CONTENT_TOP, ROOM_R, BOTTOM,
+                                 fill="#111120", outline="#333355", width=1)
+
+        # 메세지 버블 (예시)
+        for i, (txt, side) in enumerate([("안녕하세요!", "left"),
+                                          ("네, 안녕하세요 😊", "right")]):
+            y_b = CONTENT_TOP + 20 + i * 50
+            if side == "right":
+                bx1, bx2 = ROOM_R - 110, ROOM_R - 14
+                fill = "#FEE500"
+                fc = "#333"
+            else:
+                bx1, bx2 = LIST_R + 14, LIST_R + 120
+                fill = "#2a3a5a"
+                fc = "#ccc"
+            canvas.create_rectangle(bx1, y_b, bx2, y_b + 28,
+                                     fill=fill, outline="", width=0)
+            canvas.create_text((bx1 + bx2) // 2, y_b + 14,
+                               text=txt, fill=fc, font=("Arial", 8))
+
+        # 입력창 영역 ③
+        INPUT_Y = BOTTOM - 45
+        canvas.create_rectangle(LIST_R + 4, INPUT_Y, ROOM_R - 4, BOTTOM - 4,
+                                 fill="#22223a", outline="#4466aa", width=2)
+        canvas.create_text((LIST_R + ROOM_R) // 2, INPUT_Y + 20,
+                           text="메세지를 입력하세요...",
+                           fill="#555577", font=("Arial", 9))
+
+        # ── 구분선 ───────────────────────────────────────────
+        canvas.create_line(LIST_R, CONTENT_TOP, LIST_R, BOTTOM,
+                           fill="#4477bb", width=1)
+        canvas.create_line(SIDEBAR_R, CONTENT_TOP, SIDEBAR_R, BOTTOM,
+                           fill="#4477bb", width=1)
+
+        # ── 클릭 마커 ①②③ 그리기 헬퍼 ─────────────────────
+        def marker(x, y, num, color, label):
+            r = 14
+            canvas.create_oval(x - r, y - r, x + r, y + r,
+                                fill=color, outline="white", width=2)
+            canvas.create_text(x, y, text=num,
+                                fill="black", font=("Arial", 10, "bold"))
+            # 설명 라벨 (마커 옆)
+            lx = x + r + 5
+            ly = y
+            canvas.create_text(lx + 1, ly + 1, text=label,
+                                fill="#000000", anchor="w", font=("Arial", 8))
+            canvas.create_text(lx, ly, text=label,
+                                fill=color, anchor="w", font=("Arial", 8))
+
+        # ① 채팅 탭: 사이드바 중앙, 창 높이 30%
+        m1x = (8 + SIDEBAR_R) // 2
+        m1y = CONTENT_TOP + int((BOTTOM - CONTENT_TOP) * 0.30)
+        marker(m1x, m1y, "①", "#FEE500", "채팅 탭\nleft+75px\n높이×30%")
+
+        # ② 검색 버튼: right-130px, top+55px
+        m2x = W - 8 - 20          # 다이어그램 기준 오른쪽 130px 지점
+        m2y = 8 + 20
+        # 배치상 채팅목록 헤더 오른쪽 끝으로
+        m2x = LIST_R - 18
+        m2y = CONTENT_TOP + 14
+        marker(m2x, m2y, "②", "#44aaff", "검색 버튼\nright-130px\ntop+55px")
+
+        # ③ 입력창: 채팅룸 중앙, bottom-50px
+        m3x = (LIST_R + ROOM_R) // 2
+        m3y = INPUT_Y + 20
+        marker(m3x, m3y, "③", "#44dd88", "입력창\n채팅영역 중앙\nbottom-50px")
+
+        # ── 범례 ─────────────────────────────────────────────
+        # (다이어그램 내부 하단에 작게)
+        legend_y = BOTTOM - 5
+        for i, (num, col, desc) in enumerate([
+            ("①", "#FEE500", "채팅탭 클릭"),
+            ("②", "#44aaff", "검색 클릭"),
+            ("③", "#44dd88", "입력창 클릭"),
+        ]):
+            lx = 12 + i * 100
+            canvas.create_oval(lx, legend_y - 10, lx + 14, legend_y + 4,
+                                fill=col, outline="")
+            canvas.create_text(lx + 7, legend_y - 3, text=num,
+                                fill="black", font=("Arial", 7, "bold"))
+            canvas.create_text(lx + 50, legend_y - 3, text=desc,
+                                fill="#888", font=("Arial", 8))
 
     # ── 헬퍼: 카드 프레임 ────────────────────────────────────
     @staticmethod

@@ -63,6 +63,31 @@ else:
     logger.info("비-Windows 환경: 카카오톡 자동화 비활성화")
 
 # ─────────────────────────────────────────────────────────
+#  좌표 설정 — GUI 가이드 탭에서 조정 가능
+# ─────────────────────────────────────────────────────────
+_COORD: dict = {
+    # ① 채팅 탭 버튼
+    "chat_tab_x_offset":    75,    # left + N px
+    "chat_tab_y_ratio":    0.30,   # top + (height × N%)
+
+    # ② 검색 버튼 (🔍)
+    "search_x_from_right": 130,    # right - N px
+    "search_y_from_top":    55,    # top + N px
+
+    # ③ 채팅 입력창 (탭 모드 — 사이드바+목록 합산 폭)
+    "input_tab_offset":    330,    # 채팅룸 시작 x = left + N px
+    "input_y_from_bottom":  50,    # bottom - N px
+}
+
+
+def update_coord(key: str, value) -> None:
+    """GUI 좌표 가이드 탭에서 호출 — 런타임 좌표 업데이트."""
+    if key in _COORD:
+        _COORD[key] = value
+        logger.info(f"좌표 업데이트: {key} = {value}")
+
+
+# ─────────────────────────────────────────────────────────
 #  전송 잠금 — 여러 방에 동시 전송 시 충돌 방지
 #  한 번에 한 채팅방씩 순서대로 처리
 # ─────────────────────────────────────────────────────────
@@ -339,20 +364,17 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
     height = bottom - top
 
     # ── Step 1: 채팅 탭 클릭 ──────────────────────────────────
-    # 사이드바 중앙 x ≈ 창 왼쪽 + 75px
-    # 채팅 아이콘 y ≈ 창 높이의 30% (사이드바 두 번째 아이콘)
-    chat_tab_x = left + 75
-    chat_tab_y = top  + int(height * 0.30)
+    chat_tab_x = left + _COORD["chat_tab_x_offset"]
+    chat_tab_y = top  + int(height * _COORD["chat_tab_y_ratio"])
     _mouse_click(chat_tab_x, chat_tab_y)
-    logger.info(f"채팅 탭 클릭: ({chat_tab_x}, {chat_tab_y})")
+    logger.info(f"①채팅 탭 클릭: ({chat_tab_x}, {chat_tab_y})")
     time.sleep(0.5)
 
     # ── Step 2: 🔍 검색 버튼 클릭 ────────────────────────────
-    # x ≈ 창 오른쪽 - 130px  /  y ≈ 창 위쪽 + 55px
-    search_x = right - 130
-    search_y = top   + 55
+    search_x = right - _COORD["search_x_from_right"]
+    search_y = top   + _COORD["search_y_from_top"]
     _mouse_click(search_x, search_y)
-    logger.info(f"검색 버튼 클릭: ({search_x}, {search_y})")
+    logger.info(f"②검색 버튼 클릭: ({search_x}, {search_y})")
     time.sleep(0.5)
 
     # ── Step 3: 채팅방 이름 입력 ─────────────────────────────
@@ -418,11 +440,11 @@ def _click_chat_input_area(chat_hwnd: int, is_popup: bool):
         # 팝업 모드: 사이드바·목록 없음 → 정중앙
         click_x = left + width // 2
     else:
-        # 탭 모드: 사이드바+목록 약 330px 제외 후 나머지 중앙
-        offset = min(330, int(width * 0.38))
+        # 탭 모드: 사이드바+목록 폭(_COORD) 제외 후 나머지 중앙
+        offset = _COORD["input_tab_offset"]
         click_x = left + offset + (width - offset) // 2
 
-    click_y = bottom - 50   # 입력창 중앙 근처
+    click_y = bottom - _COORD["input_y_from_bottom"]
 
     # 창 포그라운드 활성화
     try:
