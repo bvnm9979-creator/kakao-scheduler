@@ -1,0 +1,22 @@
+# =============================================================
+#  requirements.txt  —  Windows 운영 환경용 (exe 빌드 포함)
+#  GitHub Actions 빌드 서버(Windows) 및 Windows PC에서 사용
+# =============================================================
+
+# GUI 프레임워크
+customtkinter==5.2.2
+
+# 이미지 처리 (PIL): 이미지 클립보드 변환 및 표시
+Pillow==10.4.0
+
+# 카카오톡 창 자동화 (Windows 전용)
+pywinauto==0.6.8
+
+# 클립보드 텍스트 입력 — 한글 IME 문제 우회
+pyperclip==1.9.0
+
+# Windows API (win32gui, win32clipboard 등)
+pywin32==306
+
+# exe 빌드 도구
+pyinstaller==6.11.1

@@ -1,0 +1,109 @@
+# =============================================================
+#  .github/workflows/build.yml
+#  카카오톡 예약 발송 프로그램 — Windows .exe 자동 빌드
+#
+#  [동작 방식]
+#  main 브랜치에 push 하거나 GitHub 웹에서 수동 실행하면:
+#  1. Windows 서버(windows-latest)에서 Python 환경 세팅
+#  2. requirements.txt 설치 (pywinauto, pywin32 포함)
+#  3. PyInstaller로 main.py → 단일 .exe 빌드
+#  4. 결과물을 Artifacts로 업로드 (30일 보관)
+#
+#  [다운로드]
+#  Actions 탭 → 해당 실행 → Artifacts 섹션 →
+#  "카카오톡자동발송-Windows-EXE" 클릭 → zip 다운로드 → 압축 해제
+# =============================================================
+
+name: 🏗️ Windows EXE Build
+
+on:
+  push:
+    branches:
+      - main           # main 브랜치 push 시 자동 실행
+  workflow_dispatch:   # GitHub 웹에서 수동 실행 버튼 활성화
+
+jobs:
+  build:
+    name: Build Windows EXE
+    runs-on: windows-latest   # GitHub 제공 Windows 환경
+
+    steps:
+      # ── Step 1: 저장소 코드 받기 ──────────────────────────
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      # ── Step 2: Python 설치 ────────────────────────────────
+      - name: 🐍 Python 3.11 세팅
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"           # pip 캐시로 빌드 속도 향상
+
+      # ── Step 3: 의존 패키지 설치 ──────────────────────────
+      - name: 📦 패키지 설치 (requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── Step 4: pywin32 설치 후 스크립트 실행 (필수!) ──────
+      # pywin32는 설치 후 post-install 스크립트를 별도로 실행해야
+      # win32gui 등이 정상 작동한다.
+      - name: 🔧 pywin32 post-install 실행
+        run: |
+          python -c "import win32api; print('pywin32 정상')" 2>nul || (
+            python Scripts/pywin32_postinstall.py -install 2>nul || echo "post-install 스킵"
+          )
+        shell: cmd
+
+      # ── Step 5: PyInstaller로 .exe 빌드 ───────────────────
+      # 옵션 설명:
+      #   --onefile        모든 파일을 단일 .exe 로 합침
+      #   --windowed       콘솔 창 없이 GUI만 표시 (Windows 전용)
+      #   --name           출력 exe 파일 이름
+      #   --hidden-import  자동 탐지 안 되는 모듈 명시
+      #   --collect-all    해당 패키지의 모든 데이터/DLL 포함
+      #   --noconfirm      기존 dist 폴더 덮어쓰기 확인 건너뜀
+      - name: 🏗️ PyInstaller 빌드
+        run: >
+          pyinstaller
+          --onefile
+          --windowed
+          --noconfirm
+          --name "카카오톡자동발송"
+          --hidden-import customtkinter
+          --hidden-import PIL
+          --hidden-import PIL._tkinter_finder
+          --hidden-import pywinauto
+          --hidden-import pywinauto.application
+          --hidden-import pywinauto.keyboard
+          --hidden-import pywinauto.findwindows
+          --hidden-import pyperclip
+          --hidden-import win32gui
+          --hidden-import win32con
+          --hidden-import win32clipboard
+          --hidden-import win32process
+          --hidden-import win32api
+          --collect-all customtkinter
+          --collect-all pywinauto
+          main.py
+
+      # ── Step 6: 빌드 결과 확인 ────────────────────────────
+      - name: 🔍 빌드 결과 확인
+        run: |
+          dir dist\
+          if exist "dist\카카오톡자동발송.exe" (
+            echo ✅ EXE 빌드 성공
+          ) else (
+            echo ❌ EXE 파일 없음 — 빌드 실패
+            exit /b 1
+          )
+        shell: cmd
+
+      # ── Step 7: 결과물 업로드 ─────────────────────────────
+      - name: 📤 EXE 파일 Artifacts 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: 카카오톡자동발송-Windows-EXE
+          path: dist/카카오톡자동발송.exe
+          retention-days: 30    # 30일 보관 (이후 자동 삭제)
+          if-no-files-found: error

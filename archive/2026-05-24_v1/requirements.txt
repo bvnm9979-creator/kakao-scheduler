@@ -1,0 +1,6 @@
+# 예약 메세지 팝업 프로그램 의존 패키지
+# GitHub Actions가 이 파일을 읽고 자동으로 설치합니다.
+
+customtkinter==5.2.2
+Pillow==10.4.0
+pyinstaller==6.11.1

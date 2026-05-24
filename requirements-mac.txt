@@ -1,0 +1,17 @@
+# =============================================================
+#  requirements-mac.txt  —  macOS 개발 환경용
+#  (pywinauto, pywin32는 macOS에 설치 불가 → 제외)
+#  GUI 확인 및 코드 작성용으로만 사용
+# =============================================================
+
+# GUI 프레임워크
+customtkinter==5.2.2
+
+# 이미지 처리
+Pillow==10.4.0
+
+# 클립보드 (macOS에서도 동작 — 개발 중 테스트 가능)
+pyperclip==1.9.0
+
+# ※ pywinauto, pywin32는 Windows 전용이므로 여기서 제외
+# ※ exe 빌드는 GitHub Actions(Windows 환경)에서만 실행

@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+__MACOSX/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# PyInstaller 빌드 결과물
+dist/
+build/
+*.spec
+
+# 기타
+*.log
