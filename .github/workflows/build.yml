@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # Node.js 24 경고 해소
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -32,30 +32,15 @@ jobs:
           cache: "pip"
 
       # ── Step 3: 패키지 설치 ────────────────────────────────
+      # pywin32 306+ 은 pip install 시 자동 초기화됨 (별도 post-install 불필요)
       - name: 📦 패키지 설치
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          python -c "import win32api; print('pywin32 OK')"
 
-      # ── Step 4: pywin32 post-install ───────────────────────
-      # pywin32는 설치 후 별도 초기화 스크립트가 필요
-      - name: 🔧 pywin32 초기화
-        shell: pwsh
-        run: |
-          python -c "
-          import subprocess, sys, os, glob
-          pattern = os.path.join(os.path.dirname(sys.executable), 'Scripts', 'pywin32_postinstall.py')
-          scripts = glob.glob(pattern)
-          if scripts:
-              subprocess.run([sys.executable, scripts[0], '-install'], check=False)
-              print('pywin32 초기화 완료')
-          else:
-              print('pywin32_postinstall.py 없음, 건너뜀')
-          "
-
-      # ── Step 5: PyInstaller 빌드 ───────────────────────────
-      # 주의: EXE 이름은 영문만 사용 (한글 이름은 빌드 환경에서 인코딩 오류 발생)
+      # ── Step 4: PyInstaller 빌드 ───────────────────────────
       - name: 🏗️ PyInstaller 빌드
         shell: pwsh
         run: |
@@ -81,19 +66,19 @@ jobs:
             --collect-all pywinauto `
             main.py
 
-      # ── Step 6: 빌드 결과 확인 ────────────────────────────
+      # ── Step 5: 빌드 결과 확인 ────────────────────────────
       - name: 🔍 결과 확인
         shell: pwsh
         run: |
           if (Test-Path "dist\KakaoScheduler.exe") {
-            Write-Host "✅ 빌드 성공: KakaoScheduler.exe"
+            Write-Host "✅ 빌드 성공"
             Get-Item "dist\KakaoScheduler.exe" | Select-Object Name, Length
           } else {
             Write-Host "❌ EXE 파일 없음"
             exit 1
           }
 
-      # ── Step 7: Artifacts 업로드 ──────────────────────────
+      # ── Step 6: Artifacts 업로드 ──────────────────────────
       - name: 📤 EXE 업로드
         uses: actions/upload-artifact@v4
         with:
