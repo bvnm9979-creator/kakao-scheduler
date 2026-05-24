@@ -478,7 +478,7 @@ class KakaoSchedulerApp(ctk.CTk):
             "search_x_from_right": 130,
             "search_y_from_top":    55,
             "input_tab_offset":    330,
-            "input_y_from_bottom":  50,
+            "input_y_from_bottom":  25,  # 25 = 입력 텍스트 영역 / 50 = 버튼행(이전 버그)
         }
 
         for key, label, unit, mn, mx in rows:
@@ -498,14 +498,33 @@ class KakaoSchedulerApp(ctk.CTk):
             ctk.CTkLabel(row, text=unit, text_color="#888",
                          font=ctk.CTkFont(size=11)).pack(side="left")
 
-        # 적용 버튼
+        # 버튼 행
+        btn_row = ctk.CTkFrame(adj_card, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(10, 16))
+
         ctk.CTkButton(
-            adj_card,
+            btn_row,
+            text="🖱️  마우스 위치 테스트",
+            font=ctk.CTkFont(size=13),
+            height=44, width=200,
+            fg_color="#2a4a7a", hover_color="#3a6aaa",
+            command=self._test_mouse_positions,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_row,
             text="✅  좌표 적용",
             font=ctk.CTkFont(size=14, weight="bold"),
-            height=44, fg_color="#1a5e32", hover_color="#154d28",
+            height=44,
+            fg_color="#1a5e32", hover_color="#154d28",
             command=self._apply_coords,
-        ).pack(fill="x", padx=16, pady=(10, 16))
+        ).pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(adj_card,
+                     text="💡 테스트 버튼: 카카오톡 창이 열린 상태에서 클릭하면\n"
+                          "   마우스가 ①②③ 위치로 순서대로 이동합니다. 맞는지 눈으로 확인하세요.",
+                     text_color="#666", font=ctk.CTkFont(size=10),
+                     justify="left", anchor="w").pack(fill="x", padx=16, pady=(0, 10))
 
     # ── 좌표 적용 핸들러 ─────────────────────────────────────
     def _apply_coords(self):
@@ -519,11 +538,81 @@ class KakaoSchedulerApp(ctk.CTk):
                     update_coord(key, int(float(raw)))
             self._set_status("🎯 좌표 설정이 적용되었습니다")
             self._log.append("좌표 설정 적용 완료", "info")
-            from tkinter import messagebox
             messagebox.showinfo("완료", "좌표가 적용되었습니다!\n이제 발송을 테스트해보세요.")
         except ValueError as e:
-            from tkinter import messagebox
             messagebox.showerror("오류", f"숫자만 입력해주세요.\n{e}")
+
+    # ── 마우스 위치 테스트 핸들러 ─────────────────────────────
+    def _test_mouse_positions(self):
+        """
+        카카오톡 창에서 ①②③ 클릭 위치로 마우스를 순서대로 이동시켜
+        좌표가 맞는지 눈으로 확인할 수 있게 한다.
+        Windows 전용 (macOS에서는 안내 메세지만 표시).
+        """
+        if not IS_WINDOWS:
+            messagebox.showinfo("안내",
+                "이 기능은 Windows에서만 사용 가능합니다.\n"
+                "Windows PC에서 실행한 뒤 테스트해보세요.")
+            return
+
+        def _run():
+            try:
+                import win32gui
+                import ctypes
+
+                # 카카오톡 창 찾기
+                hwnd = win32gui.FindWindow(None, "카카오톡")
+                if not hwnd:
+                    for title in ("KakaoTalk",):
+                        hwnd = win32gui.FindWindow(None, title)
+                        if hwnd:
+                            break
+                if not hwnd:
+                    self.after(0, lambda: messagebox.showerror(
+                        "오류", "카카오톡 창을 찾을 수 없습니다.\n카카오톡을 먼저 실행해주세요."))
+                    return
+
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                width  = right - left
+                height = bottom - top
+
+                # 현재 설정값 읽기
+                try:
+                    tab_x   = int(float(self._coord_vars["chat_tab_x_offset"].get()))
+                    tab_y_r = float(self._coord_vars["chat_tab_y_ratio"].get()) / 100.0
+                    srch_xr = int(float(self._coord_vars["search_x_from_right"].get()))
+                    srch_yt = int(float(self._coord_vars["search_y_from_top"].get()))
+                    inp_off = int(float(self._coord_vars["input_tab_offset"].get()))
+                    inp_yb  = int(float(self._coord_vars["input_y_from_bottom"].get()))
+                except Exception:
+                    tab_x, tab_y_r = 75, 0.30
+                    srch_xr, srch_yt = 130, 55
+                    inp_off, inp_yb = 330, 25
+
+                positions = [
+                    (left + tab_x,
+                     top  + int(height * tab_y_r),
+                     "① 채팅 탭 위치"),
+                    (right - srch_xr,
+                     top   + srch_yt,
+                     "② 검색 버튼 위치"),
+                    (left + inp_off + (width - inp_off) // 2,
+                     bottom - inp_yb,
+                     "③ 채팅 입력창 위치"),
+                ]
+
+                for x, y, label in positions:
+                    self.after(0, lambda l=label: self._set_status(f"🖱️  {l} 확인 중..."))
+                    ctypes.windll.user32.SetCursorPos(int(x), int(y))
+                    time.sleep(2.0)   # 2초 동안 위치 유지 → 눈으로 확인 가능
+
+                self.after(0, lambda: self._set_status("✅ 마우스 위치 테스트 완료"))
+
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("오류", f"테스트 실패:\n{e}"))
+
+        threading.Thread(target=_run, daemon=True).start()
+        self._set_status("🖱️  2초 후 카카오톡 창에서 마우스 위치를 확인하세요...")
 
     # ── 카카오톡 레이아웃 다이어그램 그리기 ──────────────────
     @staticmethod

@@ -74,9 +74,13 @@ _COORD: dict = {
     "search_x_from_right": 130,    # right - N px
     "search_y_from_top":    55,    # top + N px
 
-    # ③ 채팅 입력창 (탭 모드 — 사이드바+목록 합산 폭)
-    "input_tab_offset":    330,    # 채팅룸 시작 x = left + N px
-    "input_y_from_bottom":  50,    # bottom - N px
+    # ③ 채팅 입력창
+    # [중요] 카카오톡 하단 구조:
+    #   bottom - 0~5px   : 창 테두리
+    #   bottom - 5~45px  : 텍스트 입력창  ← 여기 클릭해야 함
+    #   bottom - 45~80px : 이모티콘/첨부 버튼 행  ← 이전 50px가 여기였음!
+    "input_tab_offset":    330,    # 탭 모드 채팅룸 시작 x = left + N px
+    "input_y_from_bottom":  25,    # bottom - N px  (기본 25 = 입력창 텍스트 영역)
 }
 
 
@@ -425,36 +429,43 @@ def _click_chat_input_area(chat_hwnd: int, is_popup: bool):
     """
     채팅 입력창 영역을 좌표로 직접 클릭한다.
 
-    [카카오톡 창 구조]
-    팝업 모드: 창 전체 = 채팅방  →  수평 중앙 하단
-    탭 모드:   사이드바(~60px) + 채팅목록(~270px) + 채팅방(나머지)
-               → 전체 너비의 60% 지점 하단
+    [카카오톡 하단 레이아웃 — y 기준 bottom(0) 부터]
+    │  0~ 5px │ 창 테두리
+    │  5~45px │ ✅ 텍스트 입력창  ← 여기 클릭
+    │ 45~80px │ 이모티콘/첨부 버튼 행
+    │ 80px~   │ 채팅 메세지 영역
 
-    입력창 y 위치 = bottom - 50px  (카카오톡 입력창 높이 약 40~55px)
+    x: 팝업=창 중앙 / 탭모드=사이드바+목록 제외 후 중앙
+    y: bottom-25 (기본) 을 1차로, bottom-20 / bottom-30 을 추가 클릭
     """
     left, top, right, bottom = win32gui.GetWindowRect(chat_hwnd)
     width  = right - left
-    height = bottom - top
 
+    # X 계산
     if is_popup:
-        # 팝업 모드: 사이드바·목록 없음 → 정중앙
         click_x = left + width // 2
     else:
-        # 탭 모드: 사이드바+목록 폭(_COORD) 제외 후 나머지 중앙
-        offset = _COORD["input_tab_offset"]
+        offset  = _COORD["input_tab_offset"]
         click_x = left + offset + (width - offset) // 2
-
-    click_y = bottom - _COORD["input_y_from_bottom"]
 
     # 창 포그라운드 활성화
     try:
         win32gui.SetForegroundWindow(chat_hwnd)
-        time.sleep(0.25)
+        time.sleep(0.3)
     except Exception as e:
         logger.debug(f"SetForegroundWindow 실패(무시): {e}")
 
-    _mouse_click(click_x, click_y)
-    logger.info(f"입력창 좌표 클릭: ({click_x}, {click_y})  팝업={is_popup}")
+    # Y: 설정값 우선, 안전 범위(20~35) 내 추가 클릭으로 반드시 입력창 진입
+    primary_y  = _COORD["input_y_from_bottom"]          # 사용자 설정 (기본 25)
+    y_attempts = sorted({primary_y, 20, 30}, reverse=True)  # 가장 아래부터
+
+    for y_off in y_attempts:
+        cy = bottom - y_off
+        _mouse_click(click_x, cy)
+        logger.info(f"입력창 클릭: ({click_x}, {cy})  y_off={y_off}")
+        time.sleep(0.15)
+
+    time.sleep(0.2)   # 마지막 클릭 후 입력창 포커스 안착 대기
 
 
 # ─────────────────────────────────────────────────────────
@@ -571,7 +582,7 @@ def send_to_room(room_name: str, message: str, image_path: str = None) -> dict:
 
             # 2. 채팅방 검색·열기 → (app, hwnd, is_popup) 반환
             chat_app, chat_hwnd, is_popup = _open_chat_room(app, room_name, main_hwnd)
-            time.sleep(0.8)   # 채팅방 완전 로딩 대기
+            time.sleep(1.5)   # 채팅방 완전 로딩 대기
 
             # 3. 이미지 먼저 전송 (이미지가 있을 때)
             if image_path:
