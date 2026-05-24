@@ -190,69 +190,91 @@ def _mouse_click(x: int, y: int):
 # ─────────────────────────────────────────────────────────
 def _select_room_from_results(app: "Application", room_name: str) -> bool:
     """
-    검색 결과 ListItem 중 room_name과 가장 잘 맞는 채팅방을 클릭한다.
+    검색 결과에서 room_name과 가장 잘 맞는 채팅방을 클릭한다.
+
+    [카카오톡 UI 특성]
+    - 검색 결과가 ListItem이 아닌 Custom 컨트롤로 렌더링될 수 있음
+    - "이스케이프" 등 UI 힌트 버튼이 ListItem으로 잘못 감지될 수 있음
+    → ListItem 방식 실패 시 모든 컨트롤 대상 넓은 탐색으로 fallback
 
     [선택 우선순위]
     1순위: 완전 일치  → item_text == room_name
     2순위: 시작 일치  → item_text.startswith(room_name)
-           예) "고현석형 외 2명" 이라면 검색어 "고현석형"으로 매칭
     3순위: 포함 일치  → room_name in item_text
-
-    실패(결과 없음 / 오류) 시 False 반환 → 호출자가 ↓Enter fallback 처리.
     """
+    # 카카오톡 UI 버튼/힌트 텍스트 (채팅방이 아닌 UI 요소)
+    UI_HINTS = {"이스케이프", "ESC", "Escape", "닫기", "취소", "검색",
+                "돌아가기", "뒤로", "더보기", "전체", "채팅"}
+
+    def _match_priority(item_text: str) -> int:
+        """0=완전일치, 1=시작일치, 2=포함일치, 99=불일치"""
+        if item_text == room_name:
+            return 0
+        if item_text.startswith(room_name):
+            return 1
+        if room_name in item_text:
+            return 2
+        return 99
+
+    def _try_click_best(candidates):
+        """우선순위순으로 정렬 후 클릭, 성공 시 True 반환."""
+        ranked = [(pri, item, t)
+                  for item, t in candidates
+                  if (pri := _match_priority(t)) < 99]
+        ranked.sort(key=lambda x: (x[0], len(x[2])))   # 우선순위 → 텍스트 짧은 순
+        for pri, item, t in ranked:
+            try:
+                item.click_input()
+                labels = ["완전 일치", "시작 일치", "포함 일치"]
+                logger.info(f"✅ {labels[pri]} 클릭: '{t}'")
+                return True
+            except Exception as e:
+                logger.debug(f"클릭 실패 ({t}): {e}")
+        return False
+
     try:
         chat_win = app.top_window()
+
+        # ── 방법 1: ListItem 탐색 (UI 힌트 제외) ─────────────────
         list_items = chat_win.descendants(control_type="ListItem")
-
-        if not list_items:
-            logger.warning("검색 결과 ListItem 없음")
-            return False
-
-        # ── 전체 결과 로깅 (디버깅) ──────────────────────────
-        texts_found = []
+        meaningful = []
         for item in list_items:
             try:
                 t = item.window_text().strip()
-                if t:
-                    texts_found.append(t)
+                if t and t not in UI_HINTS and len(t) > 1:
+                    meaningful.append((item, t))
             except Exception:
                 pass
-        logger.info(f"검색 결과 목록: {texts_found}")
 
-        # ── 1순위: 완전 일치 ─────────────────────────────────
-        for item in list_items:
+        logger.info(f"검색 결과(ListItem): {[t for _, t in meaningful]}")
+
+        if meaningful and _try_click_best(meaningful):
+            return True
+
+        # ── 방법 2: 모든 컨트롤 대상 넓은 탐색 ──────────────────
+        # (카카오톡이 Custom 컨트롤을 사용하는 경우 대비)
+        logger.info("ListItem 탐색 실패 → 전체 컨트롤 탐색 시도")
+        all_ctrls = chat_win.descendants()
+        broad = []
+        for ctrl in all_ctrls:
             try:
-                t = item.window_text().strip()
-                if t == room_name:
-                    item.click_input()
-                    logger.info(f"✅ 완전 일치 클릭: '{t}'")
-                    return True
+                ctype = ctrl.element_info.control_type
+                if ctype in ("Edit", "Document"):   # 검색 입력창 제외
+                    continue
+                t = ctrl.window_text().strip()
+                if not t or t in UI_HINTS or len(t) <= 1:
+                    continue
+                if _match_priority(t) < 99:
+                    broad.append((ctrl, t))
             except Exception:
-                continue
+                pass
 
-        # ── 2순위: 시작 일치 ─────────────────────────────────
-        for item in list_items:
-            try:
-                t = item.window_text().strip()
-                if t.startswith(room_name):
-                    item.click_input()
-                    logger.info(f"✅ 시작 일치 클릭: '{t}'")
-                    return True
-            except Exception:
-                continue
+        if broad:
+            logger.info(f"넓은 탐색 결과: {[t for _, t in broad[:5]]}")
+            if _try_click_best(broad):
+                return True
 
-        # ── 3순위: 포함 일치 ─────────────────────────────────
-        for item in list_items:
-            try:
-                t = item.window_text().strip()
-                if room_name in t:
-                    item.click_input()
-                    logger.info(f"✅ 포함 일치 클릭: '{t}'")
-                    return True
-            except Exception:
-                continue
-
-        logger.warning(f"'{room_name}'과 일치하는 결과 없음 (결과: {texts_found})")
+        logger.warning(f"'{room_name}'과 일치하는 결과 없음 → ↓Enter fallback 사용")
         return False
 
     except Exception as e:
@@ -345,9 +367,9 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
         except Exception as e:
             logger.warning(f"팝업 연결 실패: {e} → 메인 창 사용")
 
-    # 탭 모드: 검색창 Escape로 닫기
-    send_keys("{ESCAPE}")
-    time.sleep(0.3)
+    # 탭 모드: 채팅방이 메인 창 안에 열림
+    # ※ Escape 금지 — 누르면 방금 연 채팅방이 닫혀버림
+    logger.info("탭 모드 채팅방 열림 → 메인 창 사용")
     return app
 
 
