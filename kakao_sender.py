@@ -387,69 +387,95 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
         try:
             chat_app = Application(backend="uia").connect(handle=fg_hwnd)
             logger.info("채팅 팝업 창 연결 성공")
-            return chat_app
+            return chat_app, fg_hwnd, True   # (app, hwnd, is_popup=True)
         except Exception as e:
             logger.warning(f"팝업 연결 실패: {e} → 메인 창 사용")
 
     # 탭 모드: 채팅방이 메인 창 안에 열림
-    # ※ Escape 금지 — 누르면 방금 연 채팅방이 닫혀버림
     logger.info("탭 모드 채팅방 열림 → 메인 창 사용")
-    return app
+    return app, main_hwnd, False   # (app, hwnd, is_popup=False)
 
 
 # ─────────────────────────────────────────────────────────
-#  내부 함수 — 채팅 입력창 탐색
+#  내부 함수 — 채팅 입력창 좌표 클릭
 # ─────────────────────────────────────────────────────────
-def _find_input_ctrl(app: "Application"):
-    """채팅 입력창 컨트롤 탐색 (Edit → Document → RichEdit 순 fallback)."""
-    chat_win = app.top_window()
+def _click_chat_input_area(chat_hwnd: int, is_popup: bool):
+    """
+    채팅 입력창 영역을 좌표로 직접 클릭한다.
 
-    for ctrl_type in ["Edit", "Document", "RichEdit20W", "RICHEDIT50W"]:
-        try:
-            candidates = chat_win.descendants(control_type=ctrl_type)
-            # 활성화된 컨트롤만 필터링
-            enabled = [c for c in candidates if c.is_enabled()]
-            if enabled:
-                return enabled[-1]   # 마지막 = 하단 입력창
-        except Exception:
-            continue
+    [카카오톡 창 구조]
+    팝업 모드: 창 전체 = 채팅방  →  수평 중앙 하단
+    탭 모드:   사이드바(~60px) + 채팅목록(~270px) + 채팅방(나머지)
+               → 전체 너비의 60% 지점 하단
 
-    raise RuntimeError(
-        "채팅 입력창을 찾을 수 없습니다.\n"
-        "카카오톡 버전 업데이트 후 UI 구조가 바뀌었을 수 있습니다."
-    )
+    입력창 y 위치 = bottom - 50px  (카카오톡 입력창 높이 약 40~55px)
+    """
+    left, top, right, bottom = win32gui.GetWindowRect(chat_hwnd)
+    width  = right - left
+    height = bottom - top
+
+    if is_popup:
+        # 팝업 모드: 사이드바·목록 없음 → 정중앙
+        click_x = left + width // 2
+    else:
+        # 탭 모드: 사이드바+목록 약 330px 제외 후 나머지 중앙
+        offset = min(330, int(width * 0.38))
+        click_x = left + offset + (width - offset) // 2
+
+    click_y = bottom - 50   # 입력창 중앙 근처
+
+    # 창 포그라운드 활성화
+    try:
+        win32gui.SetForegroundWindow(chat_hwnd)
+        time.sleep(0.25)
+    except Exception as e:
+        logger.debug(f"SetForegroundWindow 실패(무시): {e}")
+
+    _mouse_click(click_x, click_y)
+    logger.info(f"입력창 좌표 클릭: ({click_x}, {click_y})  팝업={is_popup}")
 
 
 # ─────────────────────────────────────────────────────────
 #  내부 함수 — 텍스트 전송
 # ─────────────────────────────────────────────────────────
-def _send_text(app: "Application", message: str):
+def _send_text(app: "Application", message: str,
+               chat_hwnd: int = 0, is_popup: bool = False):
     """
-    채팅창에 텍스트를 입력하고 전송한다.
+    채팅 입력창에 텍스트를 붙여넣고 전송한다.
 
-    [줄바꿈 한번에 처리]
-    전체 메세지(줄바꿈 포함)를 클립보드에 한 번에 복사 후 Ctrl+V로 붙여넣기.
-    카카오톡은 붙여넣기 시 \\n을 자동으로 줄바꿈(Shift+Enter)으로 처리하므로
-    줄 단위로 나눠 보낼 필요 없음.
-    → 끊김 없이 전체 메세지가 한 덩어리로 입력창에 들어감.
+    [입력창 클릭 방식]
+    좌표 기반 클릭(주)을 먼저 시도하고,
+    hwnd가 없을 때만 pywinauto 컨트롤 탐색(부)으로 fallback.
+
+    [줄바꿈 처리]
+    전체 메세지를 클립보드에 한 번에 올려 Ctrl+V로 붙여넣기.
+    카카오톡은 붙여넣기 시 \\n을 줄바꿈으로 처리하므로 끊김 없음.
     """
     chat_win = app.top_window()
     chat_win.set_focus()
     time.sleep(0.3)
 
-    try:
-        ctrl = _find_input_ctrl(app)
-        ctrl.click_input()
-        time.sleep(0.2)
-    except Exception as e:
-        logger.warning(f"입력창 클릭 실패 → Tab 대체: {e}")
-        send_keys("{TAB}")
-        time.sleep(0.2)
+    # ── 입력창 클릭: 좌표 우선 ─────────────────────────────
+    if chat_hwnd:
+        _click_chat_input_area(chat_hwnd, is_popup)
+        time.sleep(0.3)
+    else:
+        # fallback: pywinauto 컨트롤 탐색
+        try:
+            for ctrl_type in ["Edit", "Document", "RichEdit20W", "RICHEDIT50W"]:
+                candidates = chat_win.descendants(control_type=ctrl_type)
+                enabled = [c for c in candidates if c.is_enabled()]
+                if enabled:
+                    enabled[-1].click_input()
+                    time.sleep(0.2)
+                    break
+        except Exception as e:
+            logger.warning(f"컨트롤 클릭 실패: {e}")
 
-    # 전체 메세지를 클립보드에 한 번에 올린 후 붙여넣기
+    # ── 메세지 붙여넣기 및 전송 ────────────────────────────
     _clip_text(message)
     send_keys("^v")
-    time.sleep(0.4)   # 붙여넣기 완료 대기
+    time.sleep(0.4)
     send_keys("{ENTER}")
     time.sleep(0.5)
     logger.info("텍스트 전송 완료")
@@ -458,7 +484,8 @@ def _send_text(app: "Application", message: str):
 # ─────────────────────────────────────────────────────────
 #  내부 함수 — 이미지 전송
 # ─────────────────────────────────────────────────────────
-def _send_image(app: "Application", image_path: str):
+def _send_image(app: "Application", image_path: str,
+                chat_hwnd: int = 0, is_popup: bool = False):
     """이미지를 클립보드 경유로 채팅창에 전송한다."""
     if not os.path.isfile(image_path):
         logger.warning(f"이미지 파일 없음, 건너뜀: {image_path}")
@@ -466,20 +493,29 @@ def _send_image(app: "Application", image_path: str):
 
     chat_win = app.top_window()
     chat_win.set_focus()
-    time.sleep(0.2)
-
-    _clip_image(image_path)
     time.sleep(0.3)
 
-    try:
-        ctrl = _find_input_ctrl(app)
-        ctrl.click_input()
-        time.sleep(0.2)
-    except Exception as e:
-        logger.warning(f"입력창 클릭 실패 → Tab 대체: {e}")
-        send_keys("{TAB}")
-        time.sleep(0.2)
+    # ── 이미지를 클립보드에 복사 ───────────────────────────
+    _clip_image(image_path)
+    time.sleep(0.4)
 
+    # ── 입력창 클릭: 좌표 우선 ─────────────────────────────
+    if chat_hwnd:
+        _click_chat_input_area(chat_hwnd, is_popup)
+        time.sleep(0.3)
+    else:
+        try:
+            for ctrl_type in ["Edit", "Document", "RichEdit20W", "RICHEDIT50W"]:
+                candidates = chat_win.descendants(control_type=ctrl_type)
+                enabled = [c for c in candidates if c.is_enabled()]
+                if enabled:
+                    enabled[-1].click_input()
+                    time.sleep(0.2)
+                    break
+        except Exception as e:
+            logger.warning(f"컨트롤 클릭 실패: {e}")
+
+    # ── 붙여넣기 및 전송 ────────────────────────────────────
     send_keys("^v")
     time.sleep(0.8)
     send_keys("{ENTER}")
@@ -511,18 +547,18 @@ def send_to_room(room_name: str, message: str, image_path: str = None) -> dict:
             app, main_hwnd = _activate_kakao()
             time.sleep(0.5)
 
-            # 2. 채팅방 검색·열기 (올바른 창에 연결된 app 반환)
-            chat_app = _open_chat_room(app, room_name, main_hwnd)
-            time.sleep(0.6)
+            # 2. 채팅방 검색·열기 → (app, hwnd, is_popup) 반환
+            chat_app, chat_hwnd, is_popup = _open_chat_room(app, room_name, main_hwnd)
+            time.sleep(0.8)   # 채팅방 완전 로딩 대기
 
             # 3. 이미지 먼저 전송 (이미지가 있을 때)
             if image_path:
-                _send_image(chat_app, image_path)
+                _send_image(chat_app, image_path, chat_hwnd, is_popup)
                 time.sleep(0.5)
 
             # 4. 텍스트 전송
             if message and message.strip():
-                _send_text(chat_app, message)
+                _send_text(chat_app, message, chat_hwnd, is_popup)
 
             logger.info(f"✅ 발송 완료 → 채팅방: '{room_name}'")
             return {"success": True, "error": ""}
