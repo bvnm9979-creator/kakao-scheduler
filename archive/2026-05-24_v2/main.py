@@ -132,6 +132,85 @@ class LogPanel(ctk.CTkFrame):
 
 
 # ─────────────────────────────────────────────
+# 시간 스핀박스 위젯
+# ─────────────────────────────────────────────
+class TimeSpinBox(ctk.CTkFrame):
+    """
+    ▲/▼ 버튼과 마우스 휠로 숫자를 조절하는 스핀박스.
+    시간(0~23) 또는 분(0~59) 선택에 사용.
+
+    [사용법]
+    spin = TimeSpinBox(parent, min_val=0, max_val=23, initial=9, width=76)
+    spin.pack(side="left")
+    value = spin.get()  # "09" 형식 문자열 반환
+    """
+
+    def __init__(self, parent, min_val: int, max_val: int,
+                 initial: int = 0, width: int = 76, **kw):
+        super().__init__(parent, fg_color="transparent", **kw)
+        self._min = min_val
+        self._max = max_val
+        self._val = max(min_val, min(max_val, initial))
+        self._var = ctk.StringVar(value=f"{self._val:02d}")
+
+        _btn_kw = dict(
+            width=width, height=22, corner_radius=6,
+            fg_color="#1e3a5f", hover_color="#2a5a9f",
+            font=ctk.CTkFont(size=11, weight="bold"),
+        )
+
+        # ▲ 버튼
+        self._up = ctk.CTkButton(self, text="▲", command=self._inc, **_btn_kw)
+        self._up.pack(fill="x", pady=(0, 2))
+
+        # 값 표시 입력창
+        self._entry = ctk.CTkEntry(
+            self, textvariable=self._var, width=width, height=38,
+            justify="center", font=ctk.CTkFont(size=17, weight="bold"),
+        )
+        self._entry.pack(fill="x")
+
+        # ▼ 버튼
+        self._dn = ctk.CTkButton(self, text="▼", command=self._dec, **_btn_kw)
+        self._dn.pack(fill="x", pady=(2, 0))
+
+        # 마우스 휠 바인딩 (Windows/macOS/Linux 공통)
+        for widget in (self, self._entry, self._up, self._dn):
+            widget.bind("<MouseWheel>", self._on_scroll)   # Windows / macOS
+            widget.bind("<Button-4>",   lambda _e: self._inc())  # Linux scroll↑
+            widget.bind("<Button-5>",   lambda _e: self._dec())  # Linux scroll↓
+
+    # ── 값 증가 / 감소 ─────────────────────────────────────
+    def _inc(self):
+        self._set(self._val + 1 if self._val < self._max else self._min)
+
+    def _dec(self):
+        self._set(self._val - 1 if self._val > self._min else self._max)
+
+    def _set(self, val: int):
+        self._val = val
+        self._var.set(f"{val:02d}")
+
+    def _on_scroll(self, event):
+        """마우스 휠 이벤트: 위로 굴리면 증가, 아래로 굴리면 감소."""
+        if event.delta > 0:
+            self._inc()
+        else:
+            self._dec()
+
+    # ── 값 읽기 ────────────────────────────────────────────
+    def get(self) -> str:
+        """현재 값을 "HH" 형식 문자열로 반환 (직접 입력도 검증)."""
+        try:
+            v = int(self._var.get())
+            v = max(self._min, min(self._max, v))
+            self._val = v
+            return f"{v:02d}"
+        except (ValueError, TypeError):
+            return f"{self._val:02d}"
+
+
+# ─────────────────────────────────────────────
 # 메인 애플리케이션
 # ─────────────────────────────────────────────
 class KakaoSchedulerApp(ctk.CTk):
@@ -232,23 +311,26 @@ class KakaoSchedulerApp(ctk.CTk):
         # ── 발송 시간 ──
         t_card = self._card(outer, "⏰  발송 시간  (여러 개 추가 가능)")
         ctk.CTkLabel(t_card,
-                     text="하나씩 추가하세요. 시간이 되면 자동으로 발송됩니다.",
+                     text="▲▼ 버튼 또는 마우스 휠로 시간 조정 →  '＋ 시간 추가' 클릭으로 등록",
                      text_color="#888", font=ctk.CTkFont(size=11), anchor="w").pack(fill="x", padx=14)
 
         t_row = ctk.CTkFrame(t_card, fg_color="transparent")
-        t_row.pack(fill="x", padx=14, pady=6)
+        t_row.pack(fill="x", padx=14, pady=8)
 
-        self._hour_var = ctk.StringVar(value="09")
-        self._min_var  = ctk.StringVar(value="00")
+        # 시 스핀박스 (0~23)
+        self._hour_spin = TimeSpinBox(t_row, min_val=0, max_val=23, initial=9, width=76)
+        self._hour_spin.pack(side="left")
+        ctk.CTkLabel(t_row, text="  시  ",
+                     font=ctk.CTkFont(size=14)).pack(side="left")
 
-        ctk.CTkOptionMenu(t_row, variable=self._hour_var,
-                          values=[f"{h:02d}" for h in range(24)], width=76).pack(side="left")
-        ctk.CTkLabel(t_row, text=" 시  ").pack(side="left")
-        ctk.CTkOptionMenu(t_row, variable=self._min_var,
-                          values=[f"{m:02d}" for m in range(60)], width=76).pack(side="left")
-        ctk.CTkLabel(t_row, text=" 분  ").pack(side="left")
+        # 분 스핀박스 (0~59)
+        self._min_spin = TimeSpinBox(t_row, min_val=0, max_val=59, initial=0, width=76)
+        self._min_spin.pack(side="left")
+        ctk.CTkLabel(t_row, text="  분  ",
+                     font=ctk.CTkFont(size=14)).pack(side="left")
+
         ctk.CTkButton(t_row, text="＋ 시간 추가", width=106,
-                      command=self._add_time_chip).pack(side="left", padx=(10, 0))
+                      command=self._add_time_chip).pack(side="left", padx=(14, 0))
 
         # 추가된 시간 칩 목록
         self._chip_frame = ctk.CTkScrollableFrame(t_card, height=52, corner_radius=8,
@@ -343,7 +425,7 @@ class KakaoSchedulerApp(ctk.CTk):
     #  설정 탭 이벤트 핸들러
     # ══════════════════════════════════════════
     def _add_time_chip(self):
-        t = f"{self._hour_var.get()}:{self._min_var.get()}"
+        t = f"{self._hour_spin.get()}:{self._min_spin.get()}"
         if t in self._time_chips:
             messagebox.showinfo("알림", f"'{t}' 은(는) 이미 추가되어 있습니다.")
             return
