@@ -21,6 +21,7 @@ import time
 import platform
 import logging
 import threading
+import ctypes
 
 logger = logging.getLogger(__name__)
 
@@ -165,114 +166,91 @@ def _clip_image(image_path: str):
 
 
 # ─────────────────────────────────────────────────────────
-#  내부 함수 — 채팅방 열기 (채팅 탭 전용)
+#  내부 함수 — 마우스 좌표 클릭 헬퍼
+# ─────────────────────────────────────────────────────────
+def _mouse_click(x: int, y: int):
+    """
+    화면의 절대 좌표(x, y)를 마우스로 클릭한다.
+
+    pywinauto 컨트롤 탐색 대신 좌표 직접 클릭을 사용하는 이유:
+    카카오톡 탭 버튼은 아이콘만 있고 텍스트가 없어서
+    pywinauto로 찾을 수 없기 때문.
+    """
+    ctypes.windll.user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.08)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.08)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(0.15)
+
+
+# ─────────────────────────────────────────────────────────
+#  내부 함수 — 채팅방 열기 (좌표 기반)
 # ─────────────────────────────────────────────────────────
 def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Application":
     """
-    카카오톡 채팅 탭의 검색창으로 채팅방을 찾아 연다.
+    카카오톡 채팅 탭 검색으로 채팅방을 찾아 연다.
 
-    [핵심 원칙]
-    Ctrl+F(통합 검색)는 사용하지 않는다.
-    → Ctrl+F 결과에는 친구 목록이 섞여 '친구 추가' 화면이 열릴 수 있음.
-    채팅 탭 검색창만 사용하면 채팅방만 표시되어 안전하다.
+    [좌표 기반 클릭 방식 사용 이유]
+    카카오톡 탭 버튼(친구/채팅/더보기)은 아이콘만 있고 텍스트가 없어서
+    pywinauto로 텍스트 탐색이 불가능하다.
+    창 크기에서 비율로 계산한 좌표를 직접 클릭한다.
+
+    [카카오톡 PC 화면 구조]
+    ┌──────────────────────────────────────┐ ← top
+    │ 사이드바│   채팅 ▼         🔍   C+  │ ← 🔍: right-130, top+55
+    │  👤     ├──────────────────────────  │
+    │  💬 ←채팅 탭(창 높이 30%)           │
+    │  ...    │   채팅방 목록              │
+    └──────────────────────────────────────┘
+      ↑ +75px
 
     [동작 순서]
-    1. 채팅 탭 버튼 클릭 (Button / TabItem / ListItem 순으로 탐색)
-    2. 채팅 탭 상단 검색 Edit 컨트롤에 방 이름 붙여넣기
-    3. 필터된 채팅 목록에서 정확 일치 → 부분 일치 순으로 클릭
-    4. 팝업 창으로 열리면 GetForegroundWindow()로 재연결
+    1. 채팅 탭 아이콘 좌표 클릭 (사이드바 두 번째 아이콘)
+    2. 🔍 검색 버튼 좌표 클릭 (우상단)
+    3. 채팅방 이름 클립보드 붙여넣기
+    4. ↓ + Enter 키로 첫 번째 결과 선택 (채팅방만 표시됨)
+    5. 팝업 창이면 재연결
     """
     main_win = app.top_window()
     main_win.set_focus()
-    time.sleep(0.3)
+    time.sleep(0.4)
+
+    # ── 창 위치·크기 계산 ────────────────────────────────────
+    left, top, right, bottom = win32gui.GetWindowRect(main_hwnd)
+    width  = right  - left
+    height = bottom - top
 
     # ── Step 1: 채팅 탭 클릭 ──────────────────────────────────
-    tab_clicked = False
-    for ctrl_type in ["Button", "TabItem", "ListItem"]:
-        if tab_clicked:
-            break
-        try:
-            for ctrl in main_win.descendants(control_type=ctrl_type):
-                try:
-                    if ctrl.window_text().strip() == "채팅":
-                        ctrl.click_input()
-                        time.sleep(0.5)
-                        logger.info("채팅 탭 전환 완료")
-                        tab_clicked = True
-                        break
-                except Exception:
-                    continue
-        except Exception:
-            continue
+    # 사이드바 중앙 x ≈ 창 왼쪽 + 75px
+    # 채팅 아이콘 y ≈ 창 높이의 30% (사이드바 두 번째 아이콘)
+    chat_tab_x = left + 75
+    chat_tab_y = top  + int(height * 0.30)
+    _mouse_click(chat_tab_x, chat_tab_y)
+    logger.info(f"채팅 탭 클릭: ({chat_tab_x}, {chat_tab_y})")
+    time.sleep(0.5)
 
-    if not tab_clicked:
-        logger.warning("채팅 탭 버튼을 찾지 못함 — 현재 탭 유지")
+    # ── Step 2: 🔍 검색 버튼 클릭 ────────────────────────────
+    # x ≈ 창 오른쪽 - 130px  /  y ≈ 창 위쪽 + 55px
+    search_x = right - 130
+    search_y = top   + 55
+    _mouse_click(search_x, search_y)
+    logger.info(f"검색 버튼 클릭: ({search_x}, {search_y})")
+    time.sleep(0.5)
 
-    # ── Step 2: 채팅 탭 검색창에 방 이름 입력 ─────────────────
-    # Ctrl+F 절대 사용 안 함 — 친구 목록이 섞여 '친구 추가' 오작동 발생
-    search_ok = False
-    try:
-        edits = main_win.descendants(control_type="Edit")
-        for edit in edits:
-            try:
-                if not edit.is_enabled():
-                    continue
-                edit.click_input()
-                time.sleep(0.2)
-                send_keys("^a")          # 기존 검색어 지우기
-                time.sleep(0.1)
-                _clip_text(room_name)
-                send_keys("^v")          # 클립보드 붙여넣기 (한글 안전)
-                time.sleep(1.2)          # 채팅 목록 필터링 대기
-                logger.info(f"채팅 탭 검색창에 '{room_name}' 입력 완료")
-                search_ok = True
-                break
-            except Exception:
-                continue
-    except Exception as e:
-        logger.error(f"검색창 탐색 중 오류: {e}")
+    # ── Step 3: 채팅방 이름 입력 ─────────────────────────────
+    # 검색창이 열린 상태에서 클립보드로 붙여넣기 (한글 안전)
+    _clip_text(room_name)
+    send_keys("^v")
+    time.sleep(1.2)   # 검색 결과 로딩 대기
+    logger.info(f"'{room_name}' 검색 입력 완료")
 
-    if not search_ok:
-        raise RuntimeError(
-            f"채팅 탭 검색창을 찾을 수 없습니다.\n"
-            f"카카오톡이 채팅 탭 상태인지 확인해주세요."
-        )
-
-    # ── Step 3: 필터된 채팅 목록에서 채팅방 클릭 ─────────────
-    # 채팅 탭 검색 결과 = 채팅방만 표시 (친구 없음) → 안전하게 클릭 가능
-    try:
-        all_items = main_win.descendants(control_type="ListItem")
-
-        # 1순위: 이름이 정확히 일치
-        for item in all_items:
-            try:
-                if item.window_text().strip() == room_name:
-                    item.click_input()
-                    logger.info(f"'{room_name}' 정확 일치 클릭")
-                    break
-            except Exception:
-                continue
-        else:
-            # 2순위: 이름이 포함된 방
-            for item in all_items:
-                try:
-                    text = item.window_text().strip()
-                    if room_name in text:
-                        item.click_input()
-                        logger.warning(f"부분 일치로 선택: '{text}'")
-                        break
-                except Exception:
-                    continue
-            else:
-                # 아이템 자체가 없으면 Enter
-                logger.warning("목록 항목 없음 → Enter 키")
-                send_keys("{ENTER}")
-
-    except Exception as e:
-        logger.warning(f"채팅방 클릭 실패: {e} → Enter 키")
-        send_keys("{ENTER}")
-
-    # ── Step 4: 채팅방 열릴 때까지 대기 ──────────────────────
+    # ── Step 4: ↓ Enter 로 첫 번째 결과 선택 ─────────────────
+    # 채팅 탭 🔍 검색 결과는 채팅방만 표시 → 친구추가 없음
+    # pywinauto ListItem 클릭 대신 키보드로 안전하게 선택
+    send_keys("{DOWN}")
+    time.sleep(0.3)
+    send_keys("{ENTER}")
     time.sleep(1.2)
 
     # ── Step 5: 팝업 창이면 재연결 ────────────────────────────
@@ -288,7 +266,7 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
         except Exception as e:
             logger.warning(f"팝업 연결 실패: {e} → 메인 창 사용")
 
-    # 탭 모드: 검색창 닫기
+    # 탭 모드: 검색창 Escape로 닫기
     send_keys("{ESCAPE}")
     time.sleep(0.3)
     return app
