@@ -43,6 +43,7 @@ if IS_WINDOWS:
         import win32gui
         import win32con
         import win32clipboard
+        import win32api
 
         from PIL import Image
 
