@@ -186,6 +186,81 @@ def _mouse_click(x: int, y: int):
 
 
 # ─────────────────────────────────────────────────────────
+#  내부 함수 — 검색 결과에서 정확한 방 선택
+# ─────────────────────────────────────────────────────────
+def _select_room_from_results(app: "Application", room_name: str) -> bool:
+    """
+    검색 결과 ListItem 중 room_name과 가장 잘 맞는 채팅방을 클릭한다.
+
+    [선택 우선순위]
+    1순위: 완전 일치  → item_text == room_name
+    2순위: 시작 일치  → item_text.startswith(room_name)
+           예) "고현석형 외 2명" 이라면 검색어 "고현석형"으로 매칭
+    3순위: 포함 일치  → room_name in item_text
+
+    실패(결과 없음 / 오류) 시 False 반환 → 호출자가 ↓Enter fallback 처리.
+    """
+    try:
+        chat_win = app.top_window()
+        list_items = chat_win.descendants(control_type="ListItem")
+
+        if not list_items:
+            logger.warning("검색 결과 ListItem 없음")
+            return False
+
+        # ── 전체 결과 로깅 (디버깅) ──────────────────────────
+        texts_found = []
+        for item in list_items:
+            try:
+                t = item.window_text().strip()
+                if t:
+                    texts_found.append(t)
+            except Exception:
+                pass
+        logger.info(f"검색 결과 목록: {texts_found}")
+
+        # ── 1순위: 완전 일치 ─────────────────────────────────
+        for item in list_items:
+            try:
+                t = item.window_text().strip()
+                if t == room_name:
+                    item.click_input()
+                    logger.info(f"✅ 완전 일치 클릭: '{t}'")
+                    return True
+            except Exception:
+                continue
+
+        # ── 2순위: 시작 일치 ─────────────────────────────────
+        for item in list_items:
+            try:
+                t = item.window_text().strip()
+                if t.startswith(room_name):
+                    item.click_input()
+                    logger.info(f"✅ 시작 일치 클릭: '{t}'")
+                    return True
+            except Exception:
+                continue
+
+        # ── 3순위: 포함 일치 ─────────────────────────────────
+        for item in list_items:
+            try:
+                t = item.window_text().strip()
+                if room_name in t:
+                    item.click_input()
+                    logger.info(f"✅ 포함 일치 클릭: '{t}'")
+                    return True
+            except Exception:
+                continue
+
+        logger.warning(f"'{room_name}'과 일치하는 결과 없음 (결과: {texts_found})")
+        return False
+
+    except Exception as e:
+        logger.error(f"결과 선택 중 오류: {e}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────
 #  내부 함수 — 채팅방 열기 (좌표 기반)
 # ─────────────────────────────────────────────────────────
 def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Application":
@@ -246,12 +321,15 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
     time.sleep(1.2)   # 검색 결과 로딩 대기
     logger.info(f"'{room_name}' 검색 입력 완료")
 
-    # ── Step 4: ↓ Enter 로 첫 번째 결과 선택 ─────────────────
-    # 채팅 탭 🔍 검색 결과는 채팅방만 표시 → 친구추가 없음
-    # pywinauto ListItem 클릭 대신 키보드로 안전하게 선택
-    send_keys("{DOWN}")
-    time.sleep(0.3)
-    send_keys("{ENTER}")
+    # ── Step 4: 정확한 채팅방 선택 ──────────────────────────
+    # pywinauto로 검색 결과 ListItem을 읽어 이름이 일치하는 방 클릭
+    # 실패 시 ↓Enter fallback(첫 번째 결과)
+    selected = _select_room_from_results(app, room_name)
+    if not selected:
+        logger.warning(f"일치하는 결과 없음 → ↓Enter로 첫 번째 결과 선택")
+        send_keys("{DOWN}")
+        time.sleep(0.3)
+        send_keys("{ENTER}")
     time.sleep(1.2)
 
     # ── Step 5: 팝업 창이면 재연결 ────────────────────────────
