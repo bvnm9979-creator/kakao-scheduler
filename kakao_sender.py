@@ -24,6 +24,7 @@ import io
 import re
 import sys
 import time
+import json
 import platform
 import logging
 import threading
@@ -89,6 +90,55 @@ def update_coord(key: str, value) -> None:
     if key in _COORD:
         _COORD[key] = value
         logger.info(f"좌표 업데이트: {key} = {value}")
+
+
+# ─────────────────────────────────────────────────────────
+#  캘리브레이션 — 입력창 절대 좌표 저장/로드
+# ─────────────────────────────────────────────────────────
+# [원리] 화면을 반반으로 고정 분할한 상태에서 사용자가 직접
+#        마우스를 입력창에 올려놓으면 그 좌표를 저장.
+#        이후 자동 발송 시 저장된 좌표를 정확히 클릭.
+#        → offset 계산 방식보다 훨씬 신뢰도 높음.
+
+_CALIBRATION_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "kakao_coords.json"
+)
+
+
+def load_calibrated_coords() -> tuple:
+    """
+    저장된 입력창 절대 좌표를 반환한다.
+    캘리브레이션이 완료되지 않았거나 파일이 없으면 (0, 0) 반환.
+    """
+    try:
+        with open(_CALIBRATION_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        x = int(d.get("input_abs_x", 0))
+        y = int(d.get("input_abs_y", 0))
+        if x > 0 and y > 0:
+            logger.info(f"캘리브레이션 좌표 로드: ({x}, {y})")
+            return x, y
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning(f"캘리브레이션 파일 읽기 실패: {e}")
+    return 0, 0
+
+
+def save_calibrated_coords(x: int, y: int) -> None:
+    """입력창 절대 좌표를 파일에 저장한다 (main.py에서 호출)."""
+    try:
+        data = {
+            "input_abs_x": x,
+            "input_abs_y": y,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "note": "카카오톡 채팅 입력창의 절대 화면 좌표",
+        }
+        with open(_CALIBRATION_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info(f"캘리브레이션 좌표 저장 완료: ({x}, {y})")
+    except Exception as e:
+        logger.error(f"캘리브레이션 저장 실패: {e}")
 
 
 # ─────────────────────────────────────────────────────────
@@ -331,95 +381,93 @@ def _select_room_from_results(app: "Application", room_name: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────
-#  내부 함수 — 채팅방 열기 (좌표 기반)
+#  내부 함수 — 채팅방 열기 (목록 직접 탐색 방식 — 검색 없음)
 # ─────────────────────────────────────────────────────────
-def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Application":
+def _open_chat_room(app: "Application", room_name: str, main_hwnd: int):
     """
-    카카오톡 채팅 탭 검색으로 채팅방을 찾아 연다.
+    카카오톡 채팅 목록에서 방을 직접 찾아 클릭한다.
 
-    [좌표 기반 클릭 방식 사용 이유]
-    카카오톡 탭 버튼(친구/채팅/더보기)은 아이콘만 있고 텍스트가 없어서
-    pywinauto로 텍스트 탐색이 불가능하다.
-    창 크기에서 비율로 계산한 좌표를 직접 클릭한다.
+    [이전 방식의 문제]
+    검색창 → 검색 결과 클릭 → 채팅방 열림 → 입력창 포커스 ← 여기서 실패
 
-    [카카오톡 PC 화면 구조]
-    ┌──────────────────────────────────────┐ ← top
-    │ 사이드바│   채팅 ▼         🔍   C+  │ ← 🔍: right-130, top+55
-    │  👤     ├──────────────────────────  │
-    │  💬 ←채팅 탭(창 높이 30%)           │
-    │  ...    │   채팅방 목록              │
-    └──────────────────────────────────────┘
-      ↑ +75px
+    [새 방식: 검색 완전 제거]
+    채팅 탭 확인 → 채팅 목록 ListItem 직접 탐색 → 방 클릭
+    → 카카오톡이 자동으로 입력창에 포커스 (사람이 쓸 때와 동일)
+    → 별도 입력창 클릭 불필요!
 
-    [동작 순서]
-    1. 채팅 탭 아이콘 좌표 클릭 (사이드바 두 번째 아이콘)
-    2. 🔍 검색 버튼 좌표 클릭 (우상단)
-    3. 채팅방 이름 클립보드 붙여넣기
-    4. ↓ + Enter 키로 첫 번째 결과 선택 (채팅방만 표시됨)
-    5. 팝업 창이면 재연결
+    [채팅 탭 클릭은 왜 하나?]
+    친구탭/더보기 등 다른 탭이 열려있을 수 있어서
+    채팅 탭 아이콘만 좌표로 클릭 (이것만 텍스트 없는 아이콘)
     """
     main_win = app.top_window()
     main_win.set_focus()
     time.sleep(0.4)
 
-    # ── 창 위치·크기 계산 ────────────────────────────────────
     left, top, right, bottom = win32gui.GetWindowRect(main_hwnd)
-    width  = right  - left
     height = bottom - top
 
-    # ── Step 1: 채팅 탭 클릭 ──────────────────────────────────
+    # ── Step 1: 채팅 탭 아이콘 클릭 (유일하게 좌표 필요) ─────
     chat_tab_x = left + _COORD["chat_tab_x_offset"]
     chat_tab_y = top  + int(height * _COORD["chat_tab_y_ratio"])
     _mouse_click(chat_tab_x, chat_tab_y)
     logger.info(f"①채팅 탭 클릭: ({chat_tab_x}, {chat_tab_y})")
-    time.sleep(0.5)
+    time.sleep(0.6)
 
-    # ── Step 2: 🔍 검색 버튼 클릭 ────────────────────────────
-    search_x = right - _COORD["search_x_from_right"]
-    search_y = top   + _COORD["search_y_from_top"]
-    _mouse_click(search_x, search_y)
-    logger.info(f"②검색 버튼 클릭: ({search_x}, {search_y})")
-    time.sleep(0.5)
+    # ── Step 2: 채팅 목록에서 방 직접 탐색 ──────────────────
+    # 검색 UI 없이 현재 보이는 채팅 목록 ListItem을 직접 탐색
+    chat_win = app.top_window()
 
-    # ── Step 3: 채팅방 이름 입력 ─────────────────────────────
-    # 검색창이 열린 상태에서 클립보드로 붙여넣기 (한글 안전)
-    _clip_text(room_name)
-    send_keys("^v")
-    time.sleep(1.5)   # 검색 결과 로딩 대기 (충분히)
-    logger.info(f"'{room_name}' 검색 입력 완료")
-
-    # ── Step 4: 정확한 채팅방 선택 (최대 2회 시도) ─────────
-    # 완전 일치만 허용 — 절대 다른 방으로 진입하지 않음
-    selected = _select_room_from_results(app, room_name)
-    if not selected:
-        logger.info("1차 탐색 실패 → 1.5초 추가 대기 후 재시도")
-        time.sleep(1.5)
-        selected = _select_room_from_results(app, room_name)
-
-    if not selected:
-        raise RuntimeError(
-            f"'{room_name}' 채팅방을 검색 결과에서 찾을 수 없습니다.\n"
-            f"채팅방 이름이 카카오톡과 정확히 일치하는지 확인해주세요.\n"
-            f"(공백·특수문자 포함)"
-        )
-    time.sleep(1.0)
-
-    # ── Step 5: 팝업 창이면 재연결 ────────────────────────────
-    fg_hwnd = win32gui.GetForegroundWindow()
-    fg_title = win32gui.GetWindowText(fg_hwnd)
-    logger.info(f"열린 창: '{fg_title}' (HWND={fg_hwnd})")
-
-    if fg_hwnd and fg_hwnd != main_hwnd:
+    def _collect_rooms():
+        items = []
         try:
-            chat_app = Application(backend="uia").connect(handle=fg_hwnd)
-            logger.info("채팅 팝업 창 연결 성공")
-            return chat_app, fg_hwnd, True   # (app, hwnd, is_popup=True)
+            for item in chat_win.descendants(control_type="ListItem"):
+                try:
+                    t = item.window_text().strip()
+                    if t and t not in _UI_HINTS and len(t) > 1:
+                        items.append((item, t))
+                except Exception:
+                    pass
         except Exception as e:
-            logger.warning(f"팝업 연결 실패: {e} → 메인 창 사용")
+            logger.warning(f"ListItem 탐색 중 오류: {e}")
+        return items
 
-    # 탭 모드: 채팅방이 메인 창 안에 열림
-    logger.info("탭 모드 채팅방 열림 → 메인 창 사용")
-    return app, main_hwnd, False   # (app, hwnd, is_popup=False)
+    candidates = _collect_rooms()
+    logger.info(f"채팅 목록 발견 ({len(candidates)}개): "
+                f"{[t for _, t in candidates[:8]]}")
+
+    # ── Step 3: 이름 일치하는 방 클릭 ────────────────────────
+    for item, text in candidates:
+        if _is_name_match(text, room_name):
+            try:
+                item.click_input()
+                logger.info(f"✅ 채팅방 클릭 성공: '{text}'")
+                time.sleep(1.2)   # 채팅방 열림 대기
+
+                # 팝업 vs 탭 모드 판별
+                fg_hwnd = win32gui.GetForegroundWindow()
+                if fg_hwnd and fg_hwnd != main_hwnd:
+                    try:
+                        chat_app = Application(backend="uia").connect(handle=fg_hwnd)
+                        logger.info("팝업 창 모드")
+                        return chat_app, fg_hwnd, True
+                    except Exception as e:
+                        logger.warning(f"팝업 연결 실패: {e}")
+
+                logger.info("탭 모드")
+                return app, main_hwnd, False
+
+            except Exception as e:
+                logger.warning(f"방 클릭 실패 ({text}): {e}")
+
+    # ── Step 4: 목록에서 못 찾으면 오류 ──────────────────────
+    raise RuntimeError(
+        f"'{room_name}' 채팅방을 채팅 목록에서 찾을 수 없습니다.\n\n"
+        f"확인사항:\n"
+        f"  • 카카오톡이 채팅 탭(💬)을 보여주고 있는지\n"
+        f"  • 채팅방 이름이 정확히 일치하는지 (공백·특수문자 포함)\n"
+        f"  • 해당 채팅방이 목록 상단에 있는지 (스크롤 내려야 보이면 직접 올려놓기)\n\n"
+        f"현재 목록: {[t for _, t in candidates[:5]]}"
+    )
 
 
 # ─────────────────────────────────────────────────────────
@@ -427,17 +475,32 @@ def _open_chat_room(app: "Application", room_name: str, main_hwnd: int) -> "Appl
 # ─────────────────────────────────────────────────────────
 def _click_chat_input_area(chat_hwnd: int, is_popup: bool):
     """
-    채팅 입력창 영역을 좌표로 직접 클릭한다.
+    채팅 입력창 영역을 클릭한다.
 
-    [카카오톡 하단 레이아웃 — y 기준 bottom(0) 부터]
-    │  0~ 5px │ 창 테두리
-    │  5~45px │ ✅ 텍스트 입력창  ← 여기 클릭
-    │ 45~80px │ 이모티콘/첨부 버튼 행
-    │ 80px~   │ 채팅 메세지 영역
+    [클릭 방식 우선순위]
+    1순위: 캘리브레이션 절대 좌표 (사용자가 직접 지정, 가장 정확)
+    2순위: offset 계산 방식 (캘리브레이션 미완료 시 폴백)
 
-    x: 팝업=창 중앙 / 탭모드=사이드바+목록 제외 후 중앙
-    y: bottom-25 (기본) 을 1차로, bottom-20 / bottom-30 을 추가 클릭
+    [캘리브레이션이란?]
+    사용자가 '🎯 입력창 위치 지정' 버튼으로 마우스를 입력창에
+    직접 올려놓으면 그 절대 좌표를 저장. 이후 항상 그 좌표를 클릭.
+    화면을 반반 고정 분할해 두면 영구적으로 유효.
     """
+    # ── 1순위: 캘리브레이션 절대 좌표 ───────────────────────
+    cal_x, cal_y = load_calibrated_coords()
+    if cal_x and cal_y:
+        try:
+            win32gui.SetForegroundWindow(chat_hwnd)
+            time.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"SetForegroundWindow 실패(무시): {e}")
+        _mouse_click(cal_x, cal_y)
+        logger.info(f"✅ 캘리브레이션 좌표로 입력창 클릭: ({cal_x}, {cal_y})")
+        time.sleep(0.3)
+        return
+
+    # ── 2순위: offset 계산 폴백 ──────────────────────────────
+    logger.warning("캘리브레이션 미완료 → offset 계산 방식 사용 (정확도 낮음)")
     left, top, right, bottom = win32gui.GetWindowRect(chat_hwnd)
     width  = right - left
 
@@ -455,17 +518,17 @@ def _click_chat_input_area(chat_hwnd: int, is_popup: bool):
     except Exception as e:
         logger.debug(f"SetForegroundWindow 실패(무시): {e}")
 
-    # Y: 설정값 우선, 안전 범위(20~35) 내 추가 클릭으로 반드시 입력창 진입
-    primary_y  = _COORD["input_y_from_bottom"]          # 사용자 설정 (기본 25)
-    y_attempts = sorted({primary_y, 20, 30}, reverse=True)  # 가장 아래부터
+    # Y: 여러 위치 순서대로 클릭 (하나라도 맞으면 포커스 획득)
+    primary_y  = _COORD["input_y_from_bottom"]
+    y_attempts = sorted({primary_y, 20, 30}, reverse=True)
 
     for y_off in y_attempts:
         cy = bottom - y_off
         _mouse_click(click_x, cy)
-        logger.info(f"입력창 클릭: ({click_x}, {cy})  y_off={y_off}")
+        logger.info(f"입력창 클릭(offset): ({click_x}, {cy})  y_off={y_off}")
         time.sleep(0.15)
 
-    time.sleep(0.2)   # 마지막 클릭 후 입력창 포커스 안착 대기
+    time.sleep(0.2)
 
 
 # ─────────────────────────────────────────────────────────
@@ -476,37 +539,24 @@ def _send_text(app: "Application", message: str,
     """
     채팅 입력창에 텍스트를 붙여넣고 전송한다.
 
-    [입력창 클릭 방식]
-    좌표 기반 클릭(주)을 먼저 시도하고,
-    hwnd가 없을 때만 pywinauto 컨트롤 탐색(부)으로 fallback.
+    [입력창 포커스 전략 — 클릭 없음!]
+    채팅 목록에서 방을 직접 클릭해서 열면
+    카카오톡이 자동으로 입력창에 포커스를 주므로
+    별도 입력창 클릭 없이 바로 Ctrl+V 가능.
 
     [줄바꿈 처리]
     전체 메세지를 클립보드에 한 번에 올려 Ctrl+V로 붙여넣기.
-    카카오톡은 붙여넣기 시 \\n을 줄바꿈으로 처리하므로 끊김 없음.
     """
-    chat_win = app.top_window()
-    chat_win.set_focus()
-    time.sleep(0.3)
+    # KakaoTalk 창을 전면으로 (포커스 유지)
+    try:
+        win32gui.SetForegroundWindow(chat_hwnd)
+        time.sleep(0.4)
+    except Exception as e:
+        logger.debug(f"SetForegroundWindow 실패(무시): {e}")
 
-    # ── 입력창 클릭: 좌표 우선 ─────────────────────────────
-    if chat_hwnd:
-        _click_chat_input_area(chat_hwnd, is_popup)
-        time.sleep(0.3)
-    else:
-        # fallback: pywinauto 컨트롤 탐색
-        try:
-            for ctrl_type in ["Edit", "Document", "RichEdit20W", "RICHEDIT50W"]:
-                candidates = chat_win.descendants(control_type=ctrl_type)
-                enabled = [c for c in candidates if c.is_enabled()]
-                if enabled:
-                    enabled[-1].click_input()
-                    time.sleep(0.2)
-                    break
-        except Exception as e:
-            logger.warning(f"컨트롤 클릭 실패: {e}")
-
-    # ── 메세지 붙여넣기 및 전송 ────────────────────────────
+    # ── 클립보드 → 붙여넣기 → 전송 ────────────────────────
     _clip_text(message)
+    time.sleep(0.2)
     send_keys("^v")
     time.sleep(0.4)
     send_keys("{ENTER}")
@@ -519,36 +569,25 @@ def _send_text(app: "Application", message: str,
 # ─────────────────────────────────────────────────────────
 def _send_image(app: "Application", image_path: str,
                 chat_hwnd: int = 0, is_popup: bool = False):
-    """이미지를 클립보드 경유로 채팅창에 전송한다."""
+    """
+    이미지를 클립보드 경유로 채팅창에 전송한다.
+    입력창 포커스는 채팅방 진입 시 카카오톡이 자동 부여하므로
+    별도 클릭 없이 바로 붙여넣기.
+    """
     if not os.path.isfile(image_path):
         logger.warning(f"이미지 파일 없음, 건너뜀: {image_path}")
         return
 
-    chat_win = app.top_window()
-    chat_win.set_focus()
-    time.sleep(0.3)
+    # KakaoTalk 창 전면 유지
+    try:
+        win32gui.SetForegroundWindow(chat_hwnd)
+        time.sleep(0.4)
+    except Exception as e:
+        logger.debug(f"SetForegroundWindow 실패(무시): {e}")
 
-    # ── 이미지를 클립보드에 복사 ───────────────────────────
+    # ── 이미지 클립보드 복사 → 붙여넣기 → 전송 ──────────
     _clip_image(image_path)
     time.sleep(0.4)
-
-    # ── 입력창 클릭: 좌표 우선 ─────────────────────────────
-    if chat_hwnd:
-        _click_chat_input_area(chat_hwnd, is_popup)
-        time.sleep(0.3)
-    else:
-        try:
-            for ctrl_type in ["Edit", "Document", "RichEdit20W", "RICHEDIT50W"]:
-                candidates = chat_win.descendants(control_type=ctrl_type)
-                enabled = [c for c in candidates if c.is_enabled()]
-                if enabled:
-                    enabled[-1].click_input()
-                    time.sleep(0.2)
-                    break
-        except Exception as e:
-            logger.warning(f"컨트롤 클릭 실패: {e}")
-
-    # ── 붙여넣기 및 전송 ────────────────────────────────────
     send_keys("^v")
     time.sleep(0.8)
     send_keys("{ENTER}")
@@ -557,7 +596,125 @@ def _send_image(app: "Application", image_path: str,
 
 
 # ─────────────────────────────────────────────────────────
-#  공개 API — 메인 발송 함수
+#  공개 API — 전체 채팅방 발송 함수
+# ─────────────────────────────────────────────────────────
+def send_to_all_rooms(message: str, image_path: str = None,
+                      progress_cb=None) -> dict:
+    """
+    채팅 목록에 있는 모든 채팅방에 순서대로 메시지를 전송한다.
+
+    [동작 순서]
+    1. 채팅 탭 클릭 (사이드바 아이콘)
+    2. 채팅 목록의 ListItem 전부 수집
+    3. 각 방: 클릭 → 입력창 자동 포커스 → 붙여넣기 → 전송
+    4. 팝업이면 닫기, 탭이면 다음 방 클릭 시 자동 교체
+
+    [progress_cb]
+    진행 상황을 UI에 알리는 콜백: progress_cb(current, total, room_name)
+    """
+    ok, reason = check_available()
+    if not ok:
+        return {"success": False, "error": reason, "count": 0, "total": 0}
+
+    with _send_lock:
+        try:
+            app, main_hwnd = _activate_kakao()
+            time.sleep(0.5)
+
+            # ── 채팅 탭 클릭 ────────────────────────────────
+            left, top, right, bottom = win32gui.GetWindowRect(main_hwnd)
+            height = bottom - top
+            chat_tab_x = left + _COORD["chat_tab_x_offset"]
+            chat_tab_y = top + int(height * _COORD["chat_tab_y_ratio"])
+            _mouse_click(chat_tab_x, chat_tab_y)
+            time.sleep(0.6)
+
+            # ── 채팅방 목록 전체 수집 ────────────────────────
+            chat_win = app.top_window()
+            room_items = []
+            try:
+                for item in chat_win.descendants(control_type="ListItem"):
+                    try:
+                        t = item.window_text().strip()
+                        if t and t not in _UI_HINTS and len(t) > 1:
+                            room_items.append((item, t))
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"목록 탐색 오류: {e}")
+
+            if not room_items:
+                return {
+                    "success": False,
+                    "error": "채팅방 목록을 찾을 수 없습니다.\n"
+                             "카카오톡 채팅 탭이 열려 있는지 확인해주세요.",
+                    "count": 0, "total": 0,
+                }
+
+            total = len(room_items)
+            logger.info(f"전체 채팅방 {total}개 발송 시작")
+            success_count = 0
+            fail_rooms = []
+
+            # ── 각 채팅방에 순서대로 발송 ────────────────────
+            for i, (item, room_name) in enumerate(room_items):
+                logger.info(f"[{i+1}/{total}] '{room_name}' 발송 중...")
+                if progress_cb:
+                    try:
+                        progress_cb(i + 1, total, room_name)
+                    except Exception:
+                        pass
+
+                try:
+                    # 방 클릭 → 카카오톡이 입력창에 자동 포커스
+                    item.click_input()
+                    time.sleep(1.0)
+
+                    fg_hwnd   = win32gui.GetForegroundWindow()
+                    is_popup  = bool(fg_hwnd and fg_hwnd != main_hwnd)
+                    chat_hwnd = fg_hwnd if is_popup else main_hwnd
+
+                    # 이미지 → 텍스트 순서로 전송
+                    if image_path:
+                        _send_image(None, image_path, chat_hwnd, is_popup)
+                        time.sleep(0.5)
+
+                    if message and message.strip():
+                        _send_text(None, message, chat_hwnd, is_popup)
+
+                    # 팝업이면 닫기
+                    if is_popup:
+                        time.sleep(0.4)
+                        try:
+                            win32gui.PostMessage(chat_hwnd, win32con.WM_CLOSE, 0, 0)
+                            time.sleep(0.5)
+                        except Exception:
+                            pass
+
+                    success_count += 1
+                    logger.info(f"✅ [{i+1}/{total}] '{room_name}' 발송 완료")
+
+                except Exception as e:
+                    logger.error(f"❌ [{i+1}/{total}] '{room_name}' 실패: {e}")
+                    fail_rooms.append(room_name)
+                    continue
+
+            err_msg = (f"{len(fail_rooms)}개 실패: {', '.join(fail_rooms[:3])}"
+                       if fail_rooms else "")
+            return {
+                "success": success_count > 0,
+                "count":   success_count,
+                "total":   total,
+                "error":   err_msg,
+            }
+
+        except Exception as e:
+            logger.error(f"전체 발송 오류: {e}", exc_info=True)
+            return {"success": False, "error": str(e), "count": 0, "total": 0}
+
+
+# ─────────────────────────────────────────────────────────
+#  공개 API — 특정 채팅방 발송 함수 (하위 호환 유지)
 # ─────────────────────────────────────────────────────────
 def send_to_room(room_name: str, message: str, image_path: str = None) -> dict:
     """
@@ -576,15 +733,17 @@ def send_to_room(room_name: str, message: str, image_path: str = None) -> dict:
         try:
             logger.info(f"▶ 발송 시작 → 채팅방: '{room_name}'")
 
-            # 1. 카카오톡 메인 창 활성화 (hwnd도 받아옴)
+            # 1. 카카오톡 메인 창 활성화
             app, main_hwnd = _activate_kakao()
             time.sleep(0.5)
 
-            # 2. 채팅방 검색·열기 → (app, hwnd, is_popup) 반환
+            # 2. 채팅 목록에서 직접 방 클릭 → (app, hwnd, is_popup) 반환
+            #    [핵심] 검색 UI 없이 목록 ListItem 직접 클릭
+            #    → 카카오톡이 자동으로 입력창 포커스 부여
             chat_app, chat_hwnd, is_popup = _open_chat_room(app, room_name, main_hwnd)
-            time.sleep(1.5)   # 채팅방 완전 로딩 대기
+            time.sleep(1.0)   # 채팅방 열림 대기 (검색보다 빠름)
 
-            # 3. 이미지 먼저 전송 (이미지가 있을 때)
+            # 3. 이미지 먼저 전송
             if image_path:
                 _send_image(chat_app, image_path, chat_hwnd, is_popup)
                 time.sleep(0.5)
@@ -592,6 +751,17 @@ def send_to_room(room_name: str, message: str, image_path: str = None) -> dict:
             # 4. 텍스트 전송
             if message and message.strip():
                 _send_text(chat_app, message, chat_hwnd, is_popup)
+
+            # 5. 팝업 창이면 전송 후 닫기 → 다음 방으로 자연스럽게 이동
+            #    탭 모드는 다음 방 클릭 시 자동 교체되므로 닫을 필요 없음
+            if is_popup:
+                time.sleep(0.4)
+                try:
+                    win32gui.PostMessage(chat_hwnd, win32con.WM_CLOSE, 0, 0)
+                    time.sleep(0.5)
+                    logger.info("팝업 채팅창 닫기 완료")
+                except Exception as e:
+                    logger.debug(f"팝업 닫기 실패(무시): {e}")
 
             logger.info(f"✅ 발송 완료 → 채팅방: '{room_name}'")
             return {"success": True, "error": ""}

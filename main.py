@@ -21,7 +21,9 @@ from tkinter import filedialog, messagebox
 
 # ── 카카오톡 자동화 모듈 (플랫폼 무관하게 import 가능)
 try:
-    from kakao_sender import send_to_room, check_available, update_coord
+    from kakao_sender import (send_to_room, send_to_all_rooms,
+                               check_available, update_coord,
+                               load_calibrated_coords, save_calibrated_coords)
     KAKAO_MODULE_OK = True
 except ImportError:
     KAKAO_MODULE_OK = False
@@ -29,10 +31,20 @@ except ImportError:
     def send_to_room(room_name, message, image_path=None):
         return {"success": False, "error": "kakao_sender 모듈을 찾을 수 없습니다."}
 
+    def send_to_all_rooms(message, image_path=None, progress_cb=None):
+        return {"success": False, "error": "kakao_sender 모듈을 찾을 수 없습니다.",
+                "count": 0, "total": 0}
+
     def check_available():
         return False, "kakao_sender 모듈 없음"
 
     def update_coord(key, value):
+        pass
+
+    def load_calibrated_coords():
+        return 0, 0
+
+    def save_calibrated_coords(x, y):
         pass
 
 
@@ -64,31 +76,39 @@ class ScheduleEntry:
     """
     하나의 '예약 설정'을 나타내는 인메모리 데이터 객체.
     프로그램을 끄면 사라진다 (저장 없음).
+
+    [rooms 필드]
+    - 빈 리스트 [] : 채팅 목록 전체 채팅방에 발송 (전체 발송 모드)
+    - 이름 목록   : 지정한 채팅방에만 발송 (선택 발송 모드)
     """
+
+    ALL_ROOMS = "__ALL__"   # 전체 발송 시 fired에 기록하는 특수 키
 
     def __init__(self, times: list, rooms: list, message: str, image_path: str):
         self.id         = str(uuid.uuid4())
-        self.times      = sorted(times)         # 발송 시간 목록 ["09:00", "13:00", ...]
-        self.rooms      = rooms                  # 채팅방 이름 목록 ["팀방", "공지방", ...]
-        self.message    = message                # 전송할 텍스트
-        self.image_path = image_path             # 이미지 절대경로 (없으면 "")
-        self.fired: set = set()                  # 이미 발송된 (time, room) 쌍
+        self.times      = sorted(times)    # ["09:00", "13:00", ...]
+        self.rooms      = rooms            # [] = 전체, [...] = 지정 방
+        self.message    = message
+        self.image_path = image_path
+        self.fired: set = set()            # (time, room_or_ALL) 쌍
+
+    @property
+    def is_all_rooms(self) -> bool:
+        return len(self.rooms) == 0
 
     def is_all_done(self) -> bool:
-        """모든 시간 × 모든 방에 발송 완료되었는지"""
-        total = len(self.times) * len(self.rooms)
-        return len(self.fired) >= total
+        fired_times = {t for (t, _) in self.fired}
+        return all(t in fired_times for t in self.times)
 
     def remaining_times(self) -> list:
-        """아직 발송 안 된 시간 목록"""
         fired_times = {t for (t, _) in self.fired}
         return [t for t in self.times if t not in fired_times]
 
     def summary(self) -> str:
         times_str = ", ".join(self.times)
-        rooms_str = " / ".join(self.rooms)
+        rooms_str = "📢 전체 채팅방" if self.is_all_rooms else " / ".join(self.rooms)
         img_icon  = " 🖼" if self.image_path else ""
-        return f"⏰ {times_str}  |  💬 {rooms_str}{img_icon}"
+        return f"⏰ {times_str}  |  {rooms_str}{img_icon}"
 
 
 # ─────────────────────────────────────────────
@@ -353,11 +373,15 @@ class KakaoSchedulerApp(ctk.CTk):
         # ── 발송 대상 채팅방 ──
         r_card = self._card(outer, "💬  발송 대상 채팅방")
         ctk.CTkLabel(r_card,
-                     text="여러 방은 쉼표(,)로 구분. 카카오톡 채팅방 이름과 정확히 일치해야 합니다.",
+                     text="📢  비워두면 채팅 목록 전체 채팅방에 발송  |  특정 방만 보내려면 쉼표(,)로 입력",
+                     text_color="#88ccff", font=ctk.CTkFont(size=12, weight="bold"),
+                     anchor="w").pack(fill="x", padx=14, pady=(0, 2))
+        ctk.CTkLabel(r_card,
+                     text="예시: 비워두기 = 전체 발송   /   '팀방, 공지방' 입력 = 해당 방만 발송",
                      text_color="#888", font=ctk.CTkFont(size=11), anchor="w").pack(fill="x", padx=14)
 
         self._room_entry = ctk.CTkEntry(r_card,
-                                         placeholder_text="예: 우리 팀방, 마케팅 공지, 고객 문의방",
+                                         placeholder_text="비워두면 전체 발송  (특정 방만: 팀방, 공지방)",
                                          height=38, font=ctk.CTkFont(size=13))
         self._room_entry.pack(fill="x", padx=14, pady=(6, 14))
 
@@ -472,6 +496,60 @@ class KakaoSchedulerApp(ctk.CTk):
             height=54,
             fg_color="#1a7a1a", hover_color="#25aa25",
             command=self._arrange_windows,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
+        # ── 🎯 캘리브레이션 카드 (핵심 기능!) ──────────────────
+        cal_card = ctk.CTkFrame(outer, corner_radius=12, fg_color="#1a0a2e",
+                                border_width=2, border_color="#8844ff")
+        cal_card.pack(fill="x", padx=2, pady=(4, 4))
+
+        ctk.CTkLabel(cal_card,
+                     text="🎯  입력창 위치 지정  —  이게 핵심이에요!",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color="#bb88ff", anchor="w").pack(fill="x", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(cal_card,
+                     text="카카오톡 입력창에 마우스를 직접 올려놓으면 그 좌표를 저장합니다.\n"
+                          "한 번만 설정하면 이후 자동 발송이 항상 정확한 위치를 클릭합니다.",
+                     text_color="#9966cc", font=ctk.CTkFont(size=12),
+                     justify="left", anchor="w").pack(fill="x", padx=16, pady=(0, 8))
+
+        # 현재 캘리브레이션 상태 표시
+        cal_x, cal_y = load_calibrated_coords()
+        if cal_x:
+            cal_status_text = f"✅  저장된 좌표: ({cal_x}, {cal_y})  —  캘리브레이션 완료"
+            cal_status_color = "#66ff88"
+        else:
+            cal_status_text = "⚠️  아직 저장된 좌표 없음  —  아래 버튼으로 설정해주세요"
+            cal_status_color = "#ffaa44"
+
+        self._cal_status_label = ctk.CTkLabel(
+            cal_card, text=cal_status_text,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=cal_status_color, anchor="w")
+        self._cal_status_label.pack(fill="x", padx=16, pady=(0, 10))
+
+        # 진행 단계 안내
+        steps_frame = ctk.CTkFrame(cal_card, fg_color="#0d0020", corner_radius=8)
+        steps_frame.pack(fill="x", padx=16, pady=(0, 10))
+        for step in [
+            "① 창 자동 배치 버튼으로 화면을 반반 나누기",
+            "② 카카오톡에서 아무 채팅방이나 열기",
+            "③ 메시지 입력창 위에 마우스를 올려놓기",
+            "④ 아래 버튼 클릭 → 5초 카운트다운 → 자동 저장",
+        ]:
+            ctk.CTkLabel(steps_frame, text=step,
+                         font=ctk.CTkFont(size=11), text_color="#8866aa",
+                         anchor="w").pack(fill="x", padx=12, pady=2)
+        ctk.CTkFrame(steps_frame, fg_color="transparent", height=6).pack()
+
+        ctk.CTkButton(
+            cal_card,
+            text="🎯  입력창 위치 지정 시작  (5초 카운트다운)",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=52,
+            fg_color="#4422aa", hover_color="#6633cc",
+            command=self._calibrate_input,
         ).pack(fill="x", padx=16, pady=(0, 16))
 
         # ── 경고 카드 ─────────────────────────────────────────
@@ -593,6 +671,76 @@ class KakaoSchedulerApp(ctk.CTk):
             messagebox.showinfo("완료", "좌표가 적용되었습니다!\n이제 발송을 테스트해보세요.")
         except ValueError as e:
             messagebox.showerror("오류", f"숫자만 입력해주세요.\n{e}")
+
+    # ── 캘리브레이션 핸들러 ──────────────────────────────────
+    def _calibrate_input(self):
+        """
+        카카오톡 채팅 입력창의 절대 화면 좌표를 캡처해서 저장한다.
+
+        [동작 방식]
+        1. 사용자에게 안내 팝업 표시
+        2. 5초 카운트다운 (상태바에 표시)
+        3. 카운트다운 끝나는 순간 마우스 위치를 캡처
+        4. 좌표를 파일에 저장 → 이후 자동 발송 시 이 좌표로 클릭
+
+        [왜 이 방법이 가장 확실한가]
+        - 어떤 화면 해상도, DPI, 카카오톡 버전에도 적용됨
+        - offset 계산은 화면마다 다를 수 있지만 이 방법은 항상 정확
+        - 화면 반반 고정 배치 상태에서 1회만 하면 영구 사용 가능
+        """
+        if not IS_WINDOWS:
+            messagebox.showinfo("안내", "이 기능은 Windows에서만 사용 가능합니다.")
+            return
+
+        # 기존 캘리브레이션 좌표 확인
+        cx, cy = load_calibrated_coords()
+        existing = f"\n\n📍 현재 저장된 좌표: ({cx}, {cy})" if cx else "\n\n📍 저장된 좌표 없음"
+
+        ok = messagebox.askokcancel(
+            "🎯  입력창 위치 지정",
+            "카카오톡 채팅 입력창의 위치를 직접 지정합니다.\n\n"
+            "【 진행 순서 】\n"
+            "① [확인] 클릭\n"
+            "② 카카오톡 채팅방 아무 데나 열기\n"
+            "③ 메시지 입력창 위에 마우스를 올려놓기\n"
+            "④ 5초 카운트다운이 끝나면 자동으로 좌표 저장\n\n"
+            "⚠️  [확인] 누른 후 5초 안에 마우스를 입력창으로 이동하세요!"
+            + existing
+        )
+        if not ok:
+            return
+
+        def _run():
+            for i in range(5, 0, -1):
+                self.after(0, lambda n=i: self._set_status(
+                    f"⏱️  {n}초 후 마우스 위치를 캡처합니다 — 지금 카카오톡 입력창에 마우스를 올려놓으세요!"))
+                time.sleep(1.0)
+
+            # 마우스 위치 캡처
+            try:
+                import win32api
+                x, y = win32api.GetCursorPos()
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("오류", f"마우스 위치 캡처 실패:\n{e}"))
+                return
+
+            # 저장
+            save_calibrated_coords(x, y)
+            logger.info(f"캘리브레이션 완료: ({x}, {y})")
+
+            # 상태 라벨 업데이트
+            self.after(0, lambda: self._cal_status_label.configure(
+                text=f"✅  저장된 좌표: ({x}, {y})  —  캘리브레이션 완료",
+                text_color="#66ff88"))
+            self.after(0, lambda: self._set_status(f"✅ 입력창 좌표 저장 완료! ({x}, {y})"))
+            self.after(0, lambda: messagebox.showinfo(
+                "✅ 캘리브레이션 완료!",
+                f"입력창 좌표가 저장되었습니다!\n\n"
+                f"📍 X: {x},  Y: {y}\n\n"
+                "이제 자동 발송 시 이 위치를 정확하게 클릭합니다.\n"
+                "화면 배치가 바뀌지 않으면 다시 설정할 필요 없습니다. 😊"))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── 창 자동 배치 핸들러 ──────────────────────────────────
     def _arrange_windows(self, silent: bool = False):
@@ -988,21 +1136,30 @@ class KakaoSchedulerApp(ctk.CTk):
             return
 
         rooms_raw = self._room_entry.get().strip()
-        if not rooms_raw:
-            messagebox.showwarning("입력 오류", "발송 대상 채팅방 이름을 입력해주세요.")
-            return
+        # 비어있으면 전체 발송 (rooms = [])
+        rooms = [r.strip() for r in rooms_raw.split(",") if r.strip()]
 
-        rooms   = [r.strip() for r in rooms_raw.split(",") if r.strip()]
         message = self._msg_box.get("0.0", "end").strip()
 
         if not message and not self._image_path:
             messagebox.showwarning("입력 오류", "전송할 메세지 또는 이미지를 하나 이상 설정해주세요.")
             return
 
+        # 전체 발송 시 확인
+        if not rooms:
+            ok = messagebox.askokcancel(
+                "📢 전체 발송 확인",
+                "채팅방을 입력하지 않았습니다.\n\n"
+                "카카오톡 채팅 목록의 모든 채팅방에 발송됩니다.\n"
+                "계속하시겠습니까?"
+            )
+            if not ok:
+                return
+
         # ── 예약 생성 ──
         entry = ScheduleEntry(
             times      = list(self._time_chips),
-            rooms      = rooms,
+            rooms      = rooms,   # [] = 전체, [...] = 지정 방
             message    = message,
             image_path = self._image_path,
         )
@@ -1078,7 +1235,8 @@ class KakaoSchedulerApp(ctk.CTk):
                          font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", padx=16, pady=1)
 
         info_line("⏰", "  /  ".join(entry.times))
-        info_line("💬", "  /  ".join(entry.rooms))
+        rooms_display = "📢 전체 채팅방" if entry.is_all_rooms else "  /  ".join(entry.rooms)
+        info_line("💬", rooms_display, "#88ccff" if entry.is_all_rooms else "#aaa")
 
         preview = entry.message[:60].replace("\n", " ↵ ") + ("…" if len(entry.message) > 60 else "")
         if preview:
@@ -1124,45 +1282,86 @@ class KakaoSchedulerApp(ctk.CTk):
         """
         1초마다 현재 시각을 확인하여 예약 시간과 대조한다.
 
-        [중복 발송 방지 로직]
-        - fired_this_minute: set에 (entry_id, time, room) 키를 기록
-        - 매 분이 시작될 때(hhmm이 바뀌면) 이 set을 초기화
-        - 0~4초 구간에서만 체크하여 정각 타이밍을 놓쳐도 5초 이내 재시도 가능
+        [전체 발송 vs 특정 방 발송]
+        - entry.rooms = []   → 전체 발송: _fire_all(entry, time) 호출
+        - entry.rooms = [...] → 특정 방: 각 방에 _fire(entry, time, room) 호출
+
+        [중복 발송 방지]
+        - fired_this_minute에 (id, hhmm, room_or_ALL) 기록
+        - 매 분 교체 시 초기화
+        - 0~4초 구간에만 발송
         """
         fired_this_minute: set = set()
         last_hhmm = ""
 
         while self._running:
-            now      = datetime.now()
-            hhmm     = now.strftime("%H:%M")
-            sec      = now.second
+            now  = datetime.now()
+            hhmm = now.strftime("%H:%M")
+            sec  = now.second
 
-            # 매 분 초기화
             if hhmm != last_hhmm:
                 fired_this_minute.clear()
                 last_hhmm = hhmm
 
-            # 정각 기준 0~4초 이내에만 발송
             if sec <= 4:
                 for entry in list(self.schedules.values()):
-                    if hhmm in entry.times:
+                    if hhmm not in entry.times:
+                        continue
+
+                    if entry.is_all_rooms:
+                        # 전체 발송 모드
+                        key = (entry.id, hhmm, ScheduleEntry.ALL_ROOMS)
+                        if key not in fired_this_minute and key not in entry.fired:
+                            fired_this_minute.add(key)
+                            self.after(0,
+                                lambda e=entry, t=hhmm: self._fire_all(e, t))
+                    else:
+                        # 특정 방 발송 모드
                         for room in entry.rooms:
                             key = (entry.id, hhmm, room)
                             if key not in fired_this_minute and key not in entry.fired:
                                 fired_this_minute.add(key)
-                                # UI 스레드 안전 실행
-                                self.after(
-                                    0,
-                                    lambda e=entry, t=hhmm, r=room: self._fire(e, t, r)
-                                )
+                                self.after(0,
+                                    lambda e=entry, t=hhmm, r=room: self._fire(e, t, r))
 
             time.sleep(1)
 
+    def _fire_all(self, entry: ScheduleEntry, fire_time: str):
+        """전체 채팅방에 발송 (별도 스레드)."""
+        def _run():
+            self._log.append(f"[{fire_time}] 📢 전체 채팅방 발송 시작...", "info")
+            self._set_status(f"📤  전체 발송 중... {fire_time}")
+
+            def _progress(current, total, room_name):
+                self.after(0, lambda: self._set_status(
+                    f"📤  [{current}/{total}] '{room_name}' 발송 중..."))
+                self.after(0, lambda: self._log.append(
+                    f"[{fire_time}] [{current}/{total}] '{room_name}'...", "info"))
+
+            result = send_to_all_rooms(
+                message     = entry.message,
+                image_path  = entry.image_path if entry.image_path else None,
+                progress_cb = _progress,
+            )
+
+            cnt   = result.get("count", 0)
+            total = result.get("total", 0)
+            if result["success"]:
+                self._log.append(
+                    f"[{fire_time}] 📢 전체 발송 완료 ({cnt}/{total}개)", "success")
+            else:
+                self._log.append(
+                    f"[{fire_time}] 📢 전체 발송 실패: {result['error']}", "error")
+
+            entry.fired.add((fire_time, ScheduleEntry.ALL_ROOMS))
+            self.after(0, self._draw_list)
+            self.after(0, lambda: self._set_status(
+                f"{'✅' if result['success'] else '❌'}  {fire_time} 전체 발송 완료 ({cnt}개)"))
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _fire(self, entry: ScheduleEntry, fire_time: str, room: str):
-        """
-        실제 발송을 별도 스레드에서 실행 (UI 블로킹 방지).
-        발송 완료 후 entry.fired 에 기록하고 목록 UI 갱신.
-        """
+        """특정 채팅방에 발송 (별도 스레드)."""
         def _run():
             self._log.append(f"[{fire_time}] '{room}' 발송 시작...", "info")
             self._set_status(f"📤  발송 중... {fire_time} → {room}")
@@ -1177,17 +1376,12 @@ class KakaoSchedulerApp(ctk.CTk):
                 self._log.append(f"[{fire_time}] '{room}' 발송 성공", "success")
             else:
                 self._log.append(
-                    f"[{fire_time}] '{room}' 발송 실패: {result['error']}", "error"
-                )
+                    f"[{fire_time}] '{room}' 발송 실패: {result['error']}", "error")
 
-            # 발송 완료 기록 (성공/실패 모두 fired 처리하여 무한 재시도 방지)
             entry.fired.add((fire_time, room))
-
-            # UI 갱신 (메인 스레드로)
             self.after(0, self._draw_list)
             self.after(0, lambda: self._set_status(
-                f"{'✅' if result['success'] else '❌'}  {fire_time} → {room} 완료"
-            ))
+                f"{'✅' if result['success'] else '❌'}  {fire_time} → {room} 완료"))
 
         threading.Thread(target=_run, daemon=True).start()
 
