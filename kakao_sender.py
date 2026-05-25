@@ -604,10 +604,11 @@ def send_to_all_rooms(message: str, image_path: str = None,
     채팅 목록 전체 발송.
 
     [핵심 원리]
-    1) 채팅 목록 패널(List 컨트롤)에 포커스 부여 → HOME(첫 방) / DOWN(다음 방) → ENTER
-    2) 메시지/이미지 전송 후 팝업은 WM_CLOSE로 닫음
-    3) DOWN 전에 항상 List 패널에 포커스를 다시 줌
-       → "입력창에 포커스가 있어서 DOWN이 안 먹힘" 버그 해결
+    1) 루프 시작 전: List 컨트롤에 set_focus() 한 번 + HOME(첫 방 커서)
+    2) 루프 내 i>0: win32api.PostMessage로 List HWND에 DOWN+ENTER 직접 전송
+       → 포커스 이동 없음, 커서 리셋 없음
+       → type_keys/set_focus는 내부에서 커서를 맨 위로 리셋하므로 절대 사용 금지
+    3) 메시지/이미지 전송 후 팝업은 WM_CLOSE로 닫음
 
     [채팅방 개수 파악 순서]
     ① ListItem descendants 스캔
@@ -723,28 +724,47 @@ def send_to_all_rooms(message: str, image_path: str = None,
 
                 try:
                     # ① 방 열기
-                    #    첫 번째: 루프 전에 이미 HOME으로 위치 잡힘 → ENTER
-                    #    이후: 메인창 활성화 → List 컨트롤에 DOWN 직접 전송 → ENTER
-                    #    [핵심] 루프 안에서 set_focus() 금지 — 커서 리셋 발생
-                    if i > 0:
-                        try:
-                            win32gui.SetForegroundWindow(main_hwnd)
-                        except Exception:
-                            pass
-                        time.sleep(0.3)
-                        # List 컨트롤에 DOWN 직접 전송 (set_focus 없이)
+                    # [핵심] type_keys/set_focus 사용 금지 — 내부적으로 set_focus() 호출 →
+                    #        커서가 맨 위로 리셋됨.
+                    # [해결] win32api.PostMessage로 List HWND에 직접 키 전송
+                    #        → 포커스 이동 없음, 커서 리셋 없음
+                    if i == 0:
+                        # 루프 전 set_focus+HOME으로 첫 번째 방에 포커스 → ENTER만
+                        send_keys("{ENTER}")
+                        time.sleep(1.2)
+                    else:
+                        # HWND 직접 전송: DOWN → ENTER
                         list_ctrl_nav = _get_list_ctrl()
+                        posted = False
                         if list_ctrl_nav:
                             try:
-                                list_ctrl_nav.type_keys("{DOWN}")
+                                lhwnd = list_ctrl_nav.handle
+                                win32api.PostMessage(lhwnd, win32con.WM_KEYDOWN,
+                                                     win32con.VK_DOWN, 0)
+                                time.sleep(0.08)
+                                win32api.PostMessage(lhwnd, win32con.WM_KEYUP,
+                                                     win32con.VK_DOWN, 0)
+                                time.sleep(0.25)
+                                win32api.PostMessage(lhwnd, win32con.WM_KEYDOWN,
+                                                     win32con.VK_RETURN, 0)
+                                time.sleep(0.08)
+                                win32api.PostMessage(lhwnd, win32con.WM_KEYUP,
+                                                     win32con.VK_RETURN, 0)
+                                posted = True
+                                logger.debug(f"[{i+1}] PostMessage DOWN+ENTER → HWND={lhwnd}")
+                            except Exception as e:
+                                logger.warning(f"PostMessage 실패, 폴백 사용: {e}")
+                        if not posted:
+                            # 폴백: 전통 방식 (커서 리셋 위험 있음)
+                            try:
+                                win32gui.SetForegroundWindow(main_hwnd)
                             except Exception:
-                                send_keys("{DOWN}")   # 폴백
-                        else:
+                                pass
+                            time.sleep(0.3)
                             send_keys("{DOWN}")
-                        time.sleep(0.2)
-
-                    send_keys("{ENTER}")      # 방 열기
-                    time.sleep(1.2)
+                            time.sleep(0.2)
+                            send_keys("{ENTER}")
+                        time.sleep(1.2)
 
                     # ② 팝업 vs 탭 판별
                     fg_hwnd   = win32gui.GetForegroundWindow()
