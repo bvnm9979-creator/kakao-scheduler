@@ -627,23 +627,23 @@ def send_to_all_rooms(message: str, image_path: str = None,
             chat_tab_x = left + _COORD["chat_tab_x_offset"]
             chat_tab_y = top + int(height * _COORD["chat_tab_y_ratio"])
             _mouse_click(chat_tab_x, chat_tab_y)
-            time.sleep(0.6)
+            time.sleep(0.8)
 
-            # ── 채팅방 목록 전체 수집 ────────────────────────
+            # ── 채팅방 이름만 수집 (참조 X — UI 갱신 후 참조 무효 방지) ──
             chat_win = app.top_window()
-            room_items = []
+            room_names = []
             try:
                 for item in chat_win.descendants(control_type="ListItem"):
                     try:
                         t = item.window_text().strip()
                         if t and t not in _UI_HINTS and len(t) > 1:
-                            room_items.append((item, t))
+                            room_names.append(t)
                     except Exception:
                         pass
             except Exception as e:
                 logger.warning(f"목록 탐색 오류: {e}")
 
-            if not room_items:
+            if not room_names:
                 return {
                     "success": False,
                     "error": "채팅방 목록을 찾을 수 없습니다.\n"
@@ -651,13 +651,13 @@ def send_to_all_rooms(message: str, image_path: str = None,
                     "count": 0, "total": 0,
                 }
 
-            total = len(room_items)
-            logger.info(f"전체 채팅방 {total}개 발송 시작")
+            total = len(room_names)
+            logger.info(f"전체 채팅방 {total}개 발송 시작: {room_names}")
             success_count = 0
             fail_rooms = []
 
             # ── 각 채팅방에 순서대로 발송 ────────────────────
-            for i, (item, room_name) in enumerate(room_items):
+            for i, room_name in enumerate(room_names):
                 logger.info(f"[{i+1}/{total}] '{room_name}' 발송 중...")
                 if progress_cb:
                     try:
@@ -666,28 +666,74 @@ def send_to_all_rooms(message: str, image_path: str = None,
                         pass
 
                 try:
-                    # 방 클릭 → 카카오톡이 입력창에 자동 포커스
-                    item.click_input()
+                    # ① 메인 창 활성화 + 채팅 탭 재클릭 (매번 초기 상태로 복귀)
+                    try:
+                        win32gui.SetForegroundWindow(main_hwnd)
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                    _mouse_click(chat_tab_x, chat_tab_y)
+                    time.sleep(0.6)
+
+                    # ② 목록 새로 수집 → 이름 일치하는 방 클릭
+                    chat_win = app.top_window()
+                    clicked = False
+                    for item in chat_win.descendants(control_type="ListItem"):
+                        try:
+                            t = item.window_text().strip()
+                            if not t:
+                                continue
+                            # 완전 일치 또는 멤버수 접미사 허용
+                            if t == room_name or (
+                                t.startswith(room_name) and
+                                _MEMBER_SUFFIX_RE.match(t[len(room_name):])
+                            ):
+                                item.click_input()
+                                clicked = True
+                                break
+                        except Exception:
+                            pass
+
+                    if not clicked:
+                        logger.warning(f"[{i+1}/{total}] '{room_name}' 찾기 실패, 건너뜀")
+                        fail_rooms.append(room_name)
+                        continue
+
                     time.sleep(1.0)
 
-                    fg_hwnd   = win32gui.GetForegroundWindow()
-                    is_popup  = bool(fg_hwnd and fg_hwnd != main_hwnd)
+                    # ③ 팝업 vs 탭 모드 판별
+                    fg_hwnd  = win32gui.GetForegroundWindow()
+                    is_popup = bool(fg_hwnd and fg_hwnd != main_hwnd)
                     chat_hwnd = fg_hwnd if is_popup else main_hwnd
 
-                    # 이미지 → 텍스트 순서로 전송
-                    if image_path:
-                        _send_image(None, image_path, chat_hwnd, is_popup)
+                    # ④ 입력창 클릭 — 자동 포커스 믿지 않고 직접 클릭
+                    _click_chat_input_area(chat_hwnd, is_popup)
+                    time.sleep(0.3)
+
+                    # ⑤ 이미지 전송
+                    if image_path and os.path.isfile(image_path):
+                        _clip_image(image_path)
+                        time.sleep(0.4)
+                        send_keys("^v")
+                        time.sleep(0.8)
+                        send_keys("{ENTER}")
                         time.sleep(0.5)
 
+                    # ⑥ 텍스트 전송
                     if message and message.strip():
-                        _send_text(None, message, chat_hwnd, is_popup)
-
-                    # 팝업이면 닫기
-                    if is_popup:
+                        _clip_text(message)
+                        time.sleep(0.2)
+                        send_keys("^v")
                         time.sleep(0.4)
+                        send_keys("{ENTER}")
+                        time.sleep(0.5)
+
+                    # ⑦ 팝업이면 닫기
+                    if is_popup:
+                        time.sleep(0.3)
                         try:
                             win32gui.PostMessage(chat_hwnd, win32con.WM_CLOSE, 0, 0)
-                            time.sleep(0.5)
+                            time.sleep(0.6)
                         except Exception:
                             pass
 
