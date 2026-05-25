@@ -693,24 +693,23 @@ def send_to_all_rooms(message: str, image_path: str = None,
             success_count = 0
             fail_rooms    = []
 
-            # ── List 패널에 포커스 부여 함수 ─────────────────
-            def _focus_chat_list():
-                """채팅 목록 패널(List)에 키보드 포커스 부여."""
+            # ── 루프 시작 전: 딱 한 번만 List 패널 포커스 + 맨 위로 ─
+            # [핵심] set_focus()는 루프 안에서 반복 호출하면 커서가 리셋됨
+            #        → 반복문 밖에서 한 번만 호출
+            list_ctrl_init = _get_list_ctrl()
+            try:
+                win32gui.SetForegroundWindow(main_hwnd)
+            except Exception:
+                pass
+            time.sleep(0.3)
+            if list_ctrl_init:
                 try:
-                    win32gui.SetForegroundWindow(main_hwnd)
-                except Exception:
-                    pass
-                time.sleep(0.25)
-                list_ctrl = _get_list_ctrl()
-                if list_ctrl:
-                    try:
-                        list_ctrl.set_focus()
-                        time.sleep(0.2)
-                        logger.debug("List 패널 포커스 완료")
-                        return True
-                    except Exception as e:
-                        logger.warning(f"List 포커스 실패: {e}")
-                return False
+                    list_ctrl_init.set_focus()
+                    time.sleep(0.2)
+                except Exception as e:
+                    logger.warning(f"초기 List 포커스 실패: {e}")
+            send_keys("{HOME}")   # 목록 맨 위(첫 번째 방)로 이동
+            time.sleep(0.3)
 
             # ── 발송 루프 ─────────────────────────────────────
             for i in range(total):
@@ -723,13 +722,25 @@ def send_to_all_rooms(message: str, image_path: str = None,
                         pass
 
                 try:
-                    # ① 채팅 목록 패널에 포커스 → 첫 방: HOME+ENTER / 이후: DOWN+ENTER
-                    _focus_chat_list()
-                    if i == 0:
-                        send_keys("{HOME}")   # 목록 맨 위(첫 번째 방) 선택
-                        time.sleep(0.2)
-                    else:
-                        send_keys("{DOWN}")   # 다음 방으로 커서 이동
+                    # ① 방 열기
+                    #    첫 번째: 루프 전에 이미 HOME으로 위치 잡힘 → ENTER
+                    #    이후: 메인창 활성화 → List 컨트롤에 DOWN 직접 전송 → ENTER
+                    #    [핵심] 루프 안에서 set_focus() 금지 — 커서 리셋 발생
+                    if i > 0:
+                        try:
+                            win32gui.SetForegroundWindow(main_hwnd)
+                        except Exception:
+                            pass
+                        time.sleep(0.3)
+                        # List 컨트롤에 DOWN 직접 전송 (set_focus 없이)
+                        list_ctrl_nav = _get_list_ctrl()
+                        if list_ctrl_nav:
+                            try:
+                                list_ctrl_nav.type_keys("{DOWN}")
+                            except Exception:
+                                send_keys("{DOWN}")   # 폴백
+                        else:
+                            send_keys("{DOWN}")
                         time.sleep(0.2)
 
                     send_keys("{ENTER}")      # 방 열기
