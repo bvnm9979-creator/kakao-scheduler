@@ -253,6 +253,12 @@ class KakaoSchedulerApp(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # ── 시작 시 자동 창 배치 (Windows 전용) ─────────────
+        # 프로그램이 완전히 표시된 후(1초) 자동으로 반반 배치
+        # silent=True: 성공 팝업 없음, 카카오톡 없어도 에러 팝업 없음
+        if IS_WINDOWS:
+            self.after(1000, lambda: self._arrange_windows(silent=True))
+
     # ══════════════════════════════════════════
     #  UI 빌드
     # ══════════════════════════════════════════
@@ -422,6 +428,52 @@ class KakaoSchedulerApp(ctk.CTk):
         outer = ctk.CTkScrollableFrame(tab)
         outer.pack(fill="both", expand=True, padx=2, pady=2)
 
+        # ── 🪟 창 자동 배치 카드 (최우선!) ──────────────────────
+        arr_card = ctk.CTkFrame(outer, corner_radius=12, fg_color="#0a2a0a",
+                                border_width=2, border_color="#33aa33")
+        arr_card.pack(fill="x", padx=2, pady=(6, 4))
+
+        ctk.CTkLabel(arr_card,
+                     text="🪟  창 자동 배치  —  이걸 먼저 하세요!",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     text_color="#66ff66", anchor="w").pack(fill="x", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(arr_card,
+                     text="버튼 하나로 발송 프로그램(왼쪽)과 카카오톡(오른쪽)을 딱 반반 배치합니다.\n"
+                          "한 번 배치하면 좌표가 자동으로 고정되어 따로 수정할 필요가 없습니다.",
+                     text_color="#99cc99", font=ctk.CTkFont(size=12),
+                     justify="left", anchor="w").pack(fill="x", padx=16, pady=(0, 10))
+
+        # 배치 도해 (텍스트 표현)
+        layout_row = ctk.CTkFrame(arr_card, fg_color="#061806", corner_radius=8)
+        layout_row.pack(fill="x", padx=16, pady=(0, 10))
+
+        left_box = ctk.CTkFrame(layout_row, fg_color="#1a3a1a", corner_radius=6,
+                                width=160, height=56)
+        left_box.pack(side="left", padx=(12, 4), pady=10)
+        left_box.pack_propagate(False)
+        ctk.CTkLabel(left_box, text="📱 발송 프로그램\n← 왼쪽 절반",
+                     font=ctk.CTkFont(size=11), text_color="#88cc88").pack(expand=True)
+
+        ctk.CTkLabel(layout_row, text="↔", text_color="#555",
+                     font=ctk.CTkFont(size=20)).pack(side="left", padx=6)
+
+        right_box = ctk.CTkFrame(layout_row, fg_color="#1a2a3e", corner_radius=6,
+                                 width=160, height=56)
+        right_box.pack(side="left", padx=(4, 12), pady=10)
+        right_box.pack_propagate(False)
+        ctk.CTkLabel(right_box, text="💬 카카오톡\n오른쪽 절반 →",
+                     font=ctk.CTkFont(size=11), text_color="#88aacc").pack(expand=True)
+
+        ctk.CTkButton(
+            arr_card,
+            text="🪟  지금 바로 반반 배치하기!",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            height=54,
+            fg_color="#1a7a1a", hover_color="#25aa25",
+            command=self._arrange_windows,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
         # ── 경고 카드 ─────────────────────────────────────────
         warn = ctk.CTkFrame(outer, corner_radius=12, fg_color="#3d1a00")
         warn.pack(fill="x", padx=2, pady=(6, 4))
@@ -541,6 +593,107 @@ class KakaoSchedulerApp(ctk.CTk):
             messagebox.showinfo("완료", "좌표가 적용되었습니다!\n이제 발송을 테스트해보세요.")
         except ValueError as e:
             messagebox.showerror("오류", f"숫자만 입력해주세요.\n{e}")
+
+    # ── 창 자동 배치 핸들러 ──────────────────────────────────
+    def _arrange_windows(self, silent: bool = False):
+        """
+        화면을 정확히 반반으로 분할하여 창을 자동 배치한다.
+        발송 프로그램 → 왼쪽 절반 / 카카오톡 → 오른쪽 절반
+
+        [좌표 안정성]
+        창을 반반으로 고정하면 kakao_sender가 GetWindowRect()로
+        읽는 카카오톡 창 위치가 항상 동일 → 좌표 따로 조정할 필요 없음
+
+        [silent=True]
+        프로그램 시작 시 자동 호출 — 성공 팝업 없이 상태바만 업데이트.
+        카카오톡이 없어도 에러 팝업 없이 발송 프로그램만 배치.
+        """
+        if not IS_WINDOWS:
+            if not silent:
+                messagebox.showinfo("안내", "이 기능은 Windows에서만 사용 가능합니다.")
+            return
+
+        def _run():
+            try:
+                import win32gui, win32con, ctypes as ct
+
+                # 화면 실제 크기
+                screen_w = ct.windll.user32.GetSystemMetrics(0)
+                screen_h = ct.windll.user32.GetSystemMetrics(1)
+                half_w   = screen_w // 2
+
+                # ── 발송 프로그램 창 찾기 ──────────────────────
+                our_hwnd = 0
+                def _enum_ours(hwnd, _):
+                    nonlocal our_hwnd
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    title = win32gui.GetWindowText(hwnd)
+                    if "예약 메세지" in title or "자동 발송" in title:
+                        our_hwnd = hwnd
+                win32gui.EnumWindows(_enum_ours, None)
+
+                # ── 발송 프로그램 → 왼쪽 절반 (항상 먼저) ──────
+                if our_hwnd:
+                    win32gui.ShowWindow(our_hwnd, win32con.SW_NORMAL)
+                    time.sleep(0.15)
+                    win32gui.MoveWindow(our_hwnd, 0, 0, half_w, screen_h, True)
+                    logger.info(f"발송 프로그램 → 왼쪽: x=0, w={half_w}, h={screen_h}")
+
+                # ── 카카오톡 창 찾기 ──────────────────────────
+                kakao_hwnd = 0
+                for t in ("카카오톡", "KakaoTalk"):
+                    h = win32gui.FindWindow(None, t)
+                    if h:
+                        kakao_hwnd = h
+                        break
+
+                if not kakao_hwnd:
+                    def _enum_kakao(hwnd, _):
+                        nonlocal kakao_hwnd
+                        if not win32gui.IsWindowVisible(hwnd):
+                            return
+                        title = win32gui.GetWindowText(hwnd)
+                        if "카카오" in title or "kakao" in title.lower():
+                            kakao_hwnd = hwnd
+                    win32gui.EnumWindows(_enum_kakao, None)
+
+                # ── 카카오톡 → 오른쪽 절반 ───────────────────
+                if kakao_hwnd:
+                    if win32gui.IsIconic(kakao_hwnd):
+                        win32gui.ShowWindow(kakao_hwnd, win32con.SW_RESTORE)
+                        time.sleep(0.3)
+                    win32gui.ShowWindow(kakao_hwnd, win32con.SW_NORMAL)  # 최대화 해제
+                    time.sleep(0.2)
+                    win32gui.MoveWindow(kakao_hwnd, half_w, 0, half_w, screen_h, True)
+                    logger.info(f"카카오톡 → 오른쪽: x={half_w}, w={half_w}, h={screen_h}")
+
+                    self.after(0, lambda: self._set_status(
+                        f"✅ 창 반반 배치 완료! (화면 {screen_w}×{screen_h})"))
+                    if not silent:
+                        self.after(0, lambda: messagebox.showinfo(
+                            "🪟 배치 완료!",
+                            f"화면 {screen_w}×{screen_h} 기준으로 배치했습니다.\n\n"
+                            f"📱 발송 프로그램  →  왼쪽  (0 ~ {half_w}px)\n"
+                            f"💬 카카오톡       →  오른쪽  ({half_w} ~ {screen_w}px)\n\n"
+                            "이제 좌표 조정 없이 바로 발송 테스트 가능합니다! 😊"))
+                else:
+                    # 카카오톡 없음 → 발송 프로그램만 배치, 조용히 안내
+                    self.after(0, lambda: self._set_status(
+                        "⚠️  발송 프로그램 배치 완료 — 카카오톡 실행 후 '반반 배치' 버튼 누르세요"))
+                    if not silent:
+                        self.after(0, lambda: messagebox.showwarning(
+                            "카카오톡 없음",
+                            "발송 프로그램은 왼쪽에 배치했습니다.\n\n"
+                            "카카오톡을 실행한 뒤\n'🪟 지금 바로 반반 배치하기' 버튼을 다시 눌러주세요."))
+
+            except Exception as e:
+                logger.error(f"창 배치 오류: {e}", exc_info=True)
+                if not silent:
+                    self.after(0, lambda: messagebox.showerror("오류", f"창 배치 실패:\n{e}"))
+
+        self._set_status("🪟 창 자동 배치 중...")
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── 마우스 위치 테스트 핸들러 ─────────────────────────────
     def _test_mouse_positions(self):
@@ -751,7 +904,7 @@ class KakaoSchedulerApp(ctk.CTk):
         # ③ 입력창: 채팅룸 중앙, bottom-50px
         m3x = (LIST_R + ROOM_R) // 2
         m3y = INPUT_Y + 20
-        marker(m3x, m3y, "③", "#44dd88", "입력창\n채팅영역 중앙\nbottom-50px")
+        marker(m3x, m3y, "③", "#44dd88", "입력창\n채팅영역 중앙\nbottom-25px")
 
         # ── 범례 ─────────────────────────────────────────────
         # (다이어그램 내부 하단에 작게)
