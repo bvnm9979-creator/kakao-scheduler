@@ -601,16 +601,23 @@ def _send_image(app: "Application", image_path: str,
 def send_to_all_rooms(message: str, image_path: str = None,
                       progress_cb=None) -> dict:
     """
-    채팅 목록에 있는 모든 채팅방에 순서대로 메시지를 전송한다.
+    채팅 목록 전체 발송 — 좌표 클릭 없는 완전 키보드 방식.
 
-    [동작 순서]
-    1. 채팅 탭 클릭 (사이드바 아이콘)
-    2. 채팅 목록의 ListItem 전부 수집
-    3. 각 방: 클릭 → 입력창 자동 포커스 → 붙여넣기 → 전송
-    4. 팝업이면 닫기, 탭이면 다음 방 클릭 시 자동 교체
+    [전제 조건]
+    카카오톡이 채팅 탭(채팅 목록이 보이는 상태)으로 열려 있어야 한다.
+    프로그램이 별도로 탭을 클릭하거나 창을 이동하지 않는다.
 
-    [progress_cb]
-    진행 상황을 UI에 알리는 콜백: progress_cb(current, total, room_name)
+    [동작 흐름 — 방 당]
+    ① 첫 번째 방: pywinauto로 첫 ListItem 클릭 → 방 열림
+    ② 이후 방: ↓ 키 → Enter 키 → 방 열림
+    ③ 방이 팝업이면 자동으로 입력창 포커스
+       탭 모드면 pywinauto로 마지막 Edit 컨트롤 클릭 (검색창이 아닌 입력창)
+    ④ 이미지 Ctrl+V → Enter, 텍스트 Ctrl+V → Enter
+    ⑤ 팝업이면 WM_CLOSE로 닫기 → 메인 창으로 복귀
+
+    [좌표 사용 여부]
+    - 하드코딩 좌표: 전혀 없음
+    - pywinauto click_input(): 요소의 bounding rect 기반 → 창 위치 무관
     """
     ok, reason = check_available()
     if not ok:
@@ -621,40 +628,40 @@ def send_to_all_rooms(message: str, image_path: str = None,
             app, main_hwnd = _activate_kakao()
             time.sleep(0.5)
 
-            # ── 채팅 탭 클릭 ────────────────────────────────
-            left, top, right, bottom = win32gui.GetWindowRect(main_hwnd)
-            height = bottom - top
-            chat_tab_x = left + _COORD["chat_tab_x_offset"]
-            chat_tab_y = top + int(height * _COORD["chat_tab_y_ratio"])
-            _mouse_click(chat_tab_x, chat_tab_y)
-            time.sleep(0.8)
-
-            # ── 채팅방 이름만 수집 (참조 X — UI 갱신 후 참조 무효 방지) ──
+            # ── 채팅방 목록 수집 (이름 + 첫 번째 항목 참조) ────
             chat_win = app.top_window()
-            room_names = []
+            room_names  = []
+            first_item  = None
             try:
                 for item in chat_win.descendants(control_type="ListItem"):
                     try:
                         t = item.window_text().strip()
                         if t and t not in _UI_HINTS and len(t) > 1:
                             room_names.append(t)
+                            if first_item is None:
+                                first_item = item
                     except Exception:
                         pass
             except Exception as e:
                 logger.warning(f"목록 탐색 오류: {e}")
 
-            if not room_names:
+            if not room_names or first_item is None:
                 return {
                     "success": False,
                     "error": "채팅방 목록을 찾을 수 없습니다.\n"
-                             "카카오톡 채팅 탭이 열려 있는지 확인해주세요.",
+                             "카카오톡에서 채팅 탭이 보이는 상태인지 확인해주세요.",
                     "count": 0, "total": 0,
                 }
 
             total = len(room_names)
             logger.info(f"전체 채팅방 {total}개 발송 시작: {room_names}")
             success_count = 0
-            fail_rooms = []
+            fail_rooms    = []
+
+            # ── 첫 번째 방: pywinauto 클릭으로 시작 ──────────
+            # (이후 방은 ↓ + Enter 키보드로 이동)
+            first_item.click_input()
+            time.sleep(1.2)
 
             # ── 각 채팅방에 순서대로 발송 ────────────────────
             for i, room_name in enumerate(room_names):
@@ -666,51 +673,43 @@ def send_to_all_rooms(message: str, image_path: str = None,
                         pass
 
                 try:
-                    # ① 메인 창 활성화 + 채팅 탭 재클릭 (매번 초기 상태로 복귀)
-                    try:
-                        win32gui.SetForegroundWindow(main_hwnd)
-                    except Exception:
-                        pass
-                    time.sleep(0.3)
-                    _mouse_click(chat_tab_x, chat_tab_y)
-                    time.sleep(0.6)
-
-                    # ② 목록 새로 수집 → 이름 일치하는 방 클릭
-                    chat_win = app.top_window()
-                    clicked = False
-                    for item in chat_win.descendants(control_type="ListItem"):
+                    # ① 2번째 방부터: 메인 창 활성화 → ↓ → Enter
+                    if i > 0:
                         try:
-                            t = item.window_text().strip()
-                            if not t:
-                                continue
-                            # 완전 일치 또는 멤버수 접미사 허용
-                            if t == room_name or (
-                                t.startswith(room_name) and
-                                _MEMBER_SUFFIX_RE.match(t[len(room_name):])
-                            ):
-                                item.click_input()
-                                clicked = True
-                                break
+                            win32gui.SetForegroundWindow(main_hwnd)
                         except Exception:
                             pass
+                        time.sleep(0.3)
+                        send_keys("{DOWN}")    # 목록에서 다음 방으로 이동
+                        time.sleep(0.3)
+                        send_keys("{ENTER}")   # 방 열기 (팝업이면 입력창 자동 포커스)
+                        time.sleep(1.2)
 
-                    if not clicked:
-                        logger.warning(f"[{i+1}/{total}] '{room_name}' 찾기 실패, 건너뜀")
-                        fail_rooms.append(room_name)
-                        continue
-
-                    time.sleep(1.0)
-
-                    # ③ 팝업 vs 탭 모드 판별
+                    # ② 팝업 vs 탭 모드 판별
                     fg_hwnd  = win32gui.GetForegroundWindow()
                     is_popup = bool(fg_hwnd and fg_hwnd != main_hwnd)
                     chat_hwnd = fg_hwnd if is_popup else main_hwnd
+                    logger.debug(f"{'팝업' if is_popup else '탭'} 모드 → HWND={chat_hwnd}")
 
-                    # ④ 입력창 클릭 — 자동 포커스 믿지 않고 직접 클릭
-                    _click_chat_input_area(chat_hwnd, is_popup)
-                    time.sleep(0.3)
+                    # ③ 탭 모드: 입력창 포커스
+                    #    팝업 모드: Enter로 열면 자동 포커스 → 추가 클릭 불필요
+                    if not is_popup:
+                        try:
+                            win_obj = app.top_window()
+                            # Edit 컨트롤 탐색: 마지막이 채팅 입력창
+                            # (첫 번째 = 검색창, 마지막 = 메시지 입력창)
+                            edits = [c for c in win_obj.descendants(control_type="Edit")
+                                     if c.is_enabled() and c.is_visible()]
+                            if edits:
+                                edits[-1].click_input()
+                                time.sleep(0.25)
+                                logger.debug(f"입력창 포커스 완료 (Edit 컨트롤 {len(edits)}개 중 마지막)")
+                            else:
+                                logger.warning("Edit 컨트롤 없음 — 포커스 생략")
+                        except Exception as e:
+                            logger.warning(f"입력창 포커스 실패(계속 진행): {e}")
 
-                    # ⑤ 이미지 전송
+                    # ④ 이미지 전송
                     if image_path and os.path.isfile(image_path):
                         _clip_image(image_path)
                         time.sleep(0.4)
@@ -719,7 +718,7 @@ def send_to_all_rooms(message: str, image_path: str = None,
                         send_keys("{ENTER}")
                         time.sleep(0.5)
 
-                    # ⑥ 텍스트 전송
+                    # ⑤ 텍스트 전송
                     if message and message.strip():
                         _clip_text(message)
                         time.sleep(0.2)
@@ -728,14 +727,14 @@ def send_to_all_rooms(message: str, image_path: str = None,
                         send_keys("{ENTER}")
                         time.sleep(0.5)
 
-                    # ⑦ 팝업이면 닫기
+                    # ⑥ 팝업이면 닫기 → 메인 창(채팅 목록)으로 복귀
                     if is_popup:
                         time.sleep(0.3)
                         try:
                             win32gui.PostMessage(chat_hwnd, win32con.WM_CLOSE, 0, 0)
-                            time.sleep(0.6)
                         except Exception:
                             pass
+                        time.sleep(0.6)
 
                     success_count += 1
                     logger.info(f"✅ [{i+1}/{total}] '{room_name}' 발송 완료")
@@ -743,7 +742,12 @@ def send_to_all_rooms(message: str, image_path: str = None,
                 except Exception as e:
                     logger.error(f"❌ [{i+1}/{total}] '{room_name}' 실패: {e}")
                     fail_rooms.append(room_name)
-                    continue
+                    # 실패해도 메인 창 활성화 후 다음 방으로 계속
+                    try:
+                        win32gui.SetForegroundWindow(main_hwnd)
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
 
             err_msg = (f"{len(fail_rooms)}개 실패: {', '.join(fail_rooms[:3])}"
                        if fail_rooms else "")
